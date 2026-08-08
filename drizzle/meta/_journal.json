@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1785967738690,
+      "tag": "0000_reflective_eternals",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1786123132455,
+      "tag": "0001_mighty_the_phantom",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786157959560,
+      "tag": "0002_jittery_ravenous",
+      "breakpoints": true
+    }
+  ]
+}
