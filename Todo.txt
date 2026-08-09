@@ -1,0 +1,12 @@
+Next task: 
+- in-game log 
+- skill info 
+- online multiplayer, match making 
+- deploy 
+
+---
+Test users
+codexqa0808 Sumobot!2026
+arena_alpha Sumobot!Alpha1
+arena_beta Sumobot!Beta1
+arena_gamma Sumobot!Gamma1

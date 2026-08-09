@@ -849,18 +849,25 @@ export function BattleArena({ mode, playerSkill, playerBotName, playerAppearance
   return (
     <section className="battle-shell" aria-label="Playable Sumobot prototype">
       <div className="battle-topbar">
-        <div>
-          <span className="eyebrow">Local training match</span>
-          <h2>{playerBotName} vs. {battleType === "pvai" ? "Pebble" : "Rival"}</h2>
+        <div className="battle-bot-identity player">
+          <strong>{playerBotName}</strong>
+          <span><b>{playerSkill}</b> {playerSkill === "boost" ? "Speed ×1.5 · 3s" : "Reflect ×2 · 3s"}</span>
         </div>
-        <div className="battle-score" aria-label={`Score ${scores.player} to ${scores.enemy}`}>
-          <strong>{scores.player}</strong><span>ROUND {round}/3</span><strong>{scores.enemy}</strong>
+        <strong className="battle-score player" aria-label={`${playerBotName} score ${scores.player}`}>{scores.player}</strong>
+        <span className="battle-time-stack">
+          <time className={`battle-clock ${timeLeft <= 15 ? "danger" : ""}`}>{formatTime(timeLeft)}</time>
+          <small>ROUND {round}/3</small>
+        </span>
+        <strong className="battle-score enemy" aria-label={`${battleType === "pvai" ? "Pebble" : "Rival"} score ${scores.enemy}`}>{scores.enemy}</strong>
+        <div className="battle-bot-identity enemy">
+          <strong>{battleType === "pvai" ? "Pebble" : "Rival"}</strong>
+          <span><b>STONE</b> Reflect ×2 · 3s</span>
         </div>
-        <div className="battle-actions-top"><div className={`battle-clock ${timeLeft <= 15 ? "danger" : ""}`}>{formatTime(timeLeft)}</div><button type="button" onClick={onExit}>Leave arena</button></div>
       </div>
 
       <div className="arena-frame">
         <canvas ref={canvasRef} width={WIDTH} height={HEIGHT} aria-label="Circular Sumobot arena" />
+        <button className="arena-leave-button" type="button" onClick={onExit}>Leave arena</button>
         <div ref={playerVisualRef} className="arena-bot team-green"><BotVisual name={playerBotName} skill={playerSkill} appearance={playerAppearance} variant="arena" team="green" /><i className="direction-marker" /></div>
         <div ref={enemyVisualRef} className="arena-bot team-red"><BotVisual name={battleType === "pvai" ? "Pebble" : "Rival"} skill="stone" appearance={ENEMY_APPEARANCE} variant="arena" team="red" /><i className="direction-marker" /></div>
         <div className="battle-message">{message}</div>

@@ -213,7 +213,13 @@ export function BattleReplay({ data, result, playedAt, onClose, embedded = false
     <div className={embedded ? "home-replay-embed" : "replay-backdrop"} role={embedded ? "region" : "dialog"} aria-modal={embedded ? undefined : true} aria-label="Battle replay">
       <section className="replay-card">
         <header><div><span className="eyebrow">Recorded battle replay</span><h2>{data.player.name} vs. {data.enemy.name}</h2><p>{playedAt} · <strong className={result}>{result.toUpperCase()}</strong></p></div>{!embedded && <button type="button" onClick={onClose} aria-label="Close replay">Close ×</button>}</header>
-        <div className="replay-score"><strong>{frame.source[3]}</strong><span>ROUND {frame.source[1]}/3 · {formatClock(frame.source[2])}</span><strong>{frame.source[4]}</strong></div>
+        <div className="replay-score replay-matchup-bar" aria-label={`Replay score ${frame.source[3]} to ${frame.source[4]}`}>
+          <div className="battle-bot-identity player"><strong>{data.player.name}</strong><span><b>{data.player.skill}</b> {data.player.skill === "boost" ? "Speed ×1.5 · 3s" : "Reflect ×2 · 3s"}</span></div>
+          <strong className="battle-score player">{frame.source[3]}</strong>
+          <span className="battle-time-stack"><time className="battle-clock">{formatClock(frame.source[2])}</time><small>ROUND {frame.source[1]}/3</small></span>
+          <strong className="battle-score enemy">{frame.source[4]}</strong>
+          <div className="battle-bot-identity enemy"><strong>{data.enemy.name}</strong><span><b>{data.enemy.skill}</b> {data.enemy.skill === "boost" ? "Speed ×1.5 · 3s" : "Reflect ×2 · 3s"}</span></div>
+        </div>
         <div className="replay-arena">
           <canvas ref={canvasRef} width={data.arena.width} height={data.arena.height} />
           <div className={`arena-bot team-green ${frame.player.stunned ? "stunned" : ""} ${frame.player.stone ? "stone-active" : ""}`} style={botStyle(frame.player.x, frame.player.y, frame.player.angle)}><BotVisual name={data.player.name} skill={data.player.skill} appearance={data.player.appearance} variant="arena" team="green" /><i className="direction-marker" /></div>

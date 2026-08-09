@@ -19,7 +19,12 @@
 .home-replay-embed .replay-card > header > button { display: none; }
 .home-replay-embed .replay-card > header h2 { font-size: 18px; }
 .home-replay-embed .replay-score { padding-bottom: 6px; }
-.home-replay-embed .replay-score strong { font-size: 30px; }
+.home-replay-embed .replay-score > .battle-score { font-size: 30px; }
+.home-replay-embed .replay-matchup-bar { grid-template-columns: minmax(82px,1fr) 34px 68px 34px minmax(82px,1fr); gap: 5px; padding-inline: 10px; }
+.home-replay-embed .replay-matchup-bar .battle-bot-identity > strong { font-size: 12px; }
+.home-replay-embed .replay-matchup-bar .battle-bot-identity > span { font-size: 5px; }
+.home-replay-embed .replay-matchup-bar .battle-time-stack { width: 68px; }
+.home-replay-embed .replay-matchup-bar .battle-clock { font-size: 19px; }
 .home-replay-embed .replay-arena canvas { aspect-ratio: 760 / 510; }
 .home-replay-embed .replay-controls { padding: 8px 10px 10px; }
 .home-replay-embed .replay-diagnostics-overlay { position: absolute; z-index: 7; inset: 0 0 0 auto; width: 50%; margin: 0; padding: 13px; overflow: auto; border-width: 0 0 0 1px; border-radius: 0; background: rgba(9,14,28,.52); backdrop-filter: blur(6px); animation: replay-analysis-in .18s ease-out; }
