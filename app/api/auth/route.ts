@@ -51,7 +51,13 @@ export async function POST(request: Request) {
     const response = NextResponse.json({ user: result.user });
     response.headers.append("Set-Cookie", sessionCookie(result.token, request));
     return response;
-  } catch {
+  } catch (error) {
+    console.error("[auth] account action failed", {
+      action: body.action,
+      error: error instanceof Error
+        ? { name: error.name, message: error.message, stack: error.stack }
+        : String(error),
+    });
     return NextResponse.json({ error: "The account database is temporarily unavailable." }, { status: 503 });
   }
 }
