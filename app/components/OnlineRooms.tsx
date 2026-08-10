@@ -119,7 +119,7 @@ export function OnlineRoomBrowser({ bots, selectedBotId, mode, roundSeconds, act
         </div>
         {privateRoom && <input value={createCode} onChange={(event) => setCreateCode(event.target.value)} minLength={4} maxLength={24} placeholder="Create a 4-24 character code" aria-label="Private room code" />}
         <div className="room-create-summary"><strong>{mode.toUpperCase()}</strong><span>{selectedBot?.name ?? "Select a bot"} · {roundSeconds}s rounds · {actionIntervalMs}ms tick</span></div>
-        <button type="button" className="battle-launch" disabled={busy || !selectedBot || (privateRoom && createCode.trim().length < 4)} onClick={createRoom}>Create room</button>
+        <button type="button" className="button button-primary battle-launch create-room-button" disabled={busy || !selectedBot || (privateRoom && createCode.trim().length < 4)} onClick={createRoom}>Create room</button>
       </div>
 
       <p className="room-message" aria-live="polite">{message}</p>
