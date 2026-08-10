@@ -30,17 +30,37 @@ export const GAME_RULES = {
   },
 } as const;
 
+export interface MatchOutcomeRule {
+  rankPoints: number;
+  rewards: { xp: number; gold: number };
+}
+
+/**
+ * The single reward/ranking ruleset used by browser and server flows.
+ * Keeping outcomes as structured data makes future seasons and game modes
+ * configurable without scattering reward literals through the application.
+ */
+export const MATCH_OUTCOME_RULES: Record<MatchResult, MatchOutcomeRule> = {
+  win: { rankPoints: 1, rewards: { xp: 100, gold: 25 } },
+  draw: { rankPoints: 0.5, rewards: { xp: 75, gold: 15 } },
+  loss: { rankPoints: 0.25, rewards: { xp: 50, gold: 10 } },
+};
+
 export const RANK_POINTS: Record<MatchResult, number> = {
-  win: 1,
-  draw: 0.5,
-  loss: 0.25,
+  win: MATCH_OUTCOME_RULES.win.rankPoints,
+  draw: MATCH_OUTCOME_RULES.draw.rankPoints,
+  loss: MATCH_OUTCOME_RULES.loss.rankPoints,
 };
 
 export const MATCH_REWARDS: Record<MatchResult, { xp: number; gold: number }> = {
-  win: { xp: 100, gold: 25 },
-  draw: { xp: 75, gold: 15 },
-  loss: { xp: 50, gold: 10 },
+  win: MATCH_OUTCOME_RULES.win.rewards,
+  draw: MATCH_OUTCOME_RULES.draw.rewards,
+  loss: MATCH_OUTCOME_RULES.loss.rewards,
 };
+
+export const CAMPAIGN_REWARD_RULES = {
+  firstCompletion: { xp: 150, gold: 40 },
+} as const;
 
 export function clampActionDuration(value: number) {
   const { minimum, maximum, step } = GAME_RULES.actionDuration;

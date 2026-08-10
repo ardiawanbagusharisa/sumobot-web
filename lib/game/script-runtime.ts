@@ -221,6 +221,7 @@ class Parser {
 }
 
 type RuntimeValue = number | string | boolean | null | ScriptAction | Record<string, unknown>;
+export type ScriptRuntimeSnapshot = Record<string, number | string | boolean | null>;
 interface Scope { values: Map<string, RuntimeValue>; constants: Set<string> }
 interface Execution { returned: boolean; value?: RuntimeValue }
 
@@ -365,6 +366,18 @@ export function createScriptRuntime(source: string) {
 
   return {
     reset: initialize,
+    snapshot(): ScriptRuntimeSnapshot {
+      return Object.fromEntries(Array.from(globals.values.entries()).filter((entry): entry is [string, number | string | boolean | null] => {
+        const value = entry[1];
+        return value === null || typeof value === "number" || typeof value === "string" || typeof value === "boolean";
+      }));
+    },
+    restore(snapshot: ScriptRuntimeSnapshot) {
+      for (const [name, value] of Object.entries(snapshot)) {
+        if (!globals.values.has(name)) throw new Error(`Cannot restore unknown global variable "${name}".`);
+        globals.values.set(name, value);
+      }
+    },
     decide(input: ScriptGameState) {
       budget = 0;
       const result = callFunction("decide", [input.game], 0);

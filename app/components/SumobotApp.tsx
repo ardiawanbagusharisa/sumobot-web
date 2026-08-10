@@ -1,5 +1,5 @@
 "use client";
-import { useMemo, useState, useEffect, type CSSProperties, type FormEvent } from "react";
+import { useCallback, useMemo, useRef, useState, useEffect, type CSSProperties, type FormEvent } from "react";
 import { BattleArena, type BattleReplayData, type BattleTelemetry } from "./BattleArena";
 import { BattleReplay } from "./BattleReplay";
 import { BotVisual, type BotAppearance } from "./BotVisual";
@@ -7,6 +7,8 @@ import { campaignChapters, marketItems } from "@/lib/game/prototype-data";
 import { FSM_SCRIPT, MATCH_REWARDS, PRIMITIVE_SCRIPT, RANK_POINTS, STARTER_SCRIPT, type ControlMode, type MatchResult, type SkillType } from "@/lib/game/rules";
 import { migrateLegacyJsonScript, parseBotScript } from "@/lib/game/script-runtime";
 import { HOME_DEMO_META, HOME_DEMO_REPLAY } from "@/lib/game/demo-replay";
+import { OnlineBattleRoom, OnlineRoomBrowser } from "./OnlineRooms";
+import type { OnlineBotSelection } from "@/lib/online/types";
 type View = "home" | "play" | "campaign" | "hangar" | "market" | "leaderboard" | "lab";
 type CosmeticSlot = (typeof marketItems)[number]["slot"];
 type CosmeticId = (typeof marketItems)[number]["id"];
@@ -192,6 +194,10 @@ export function SumobotApp() {
     const [apiSection, setApiSection] = useState<(typeof SCRIPT_API_SECTIONS)[number]["id"]>("movement");
     const [marketFilter, setMarketFilter] = useState<"all" | CosmeticSlot>("all");
     const [marketEquipItemId, setMarketEquipItemId] = useState<CosmeticId | null>(null);
+    const [onlineRoomId, setOnlineRoomId] = useState<string | null>(null);
+    const [profileLoaded, setProfileLoaded] = useState(false);
+    const profileRevisionRef = useRef(0);
+    const lastSyncedProfileRef = useRef("");
     const showToast = (message: string) => { setToast(message); window.setTimeout(() => setToast(null), 2800); };
     const applySaved = (saved: SavedProfile | null) => {
         if (!saved)
@@ -256,24 +262,52 @@ export function SumobotApp() {
         setScriptStatus("Starter script loaded");
         setReplayLogId(null);
         setHomeReplayLogId(null);
+        setOnlineRoomId(null);
+        setProfileLoaded(false);
+        profileRevisionRef.current = 0;
+        lastSyncedProfileRef.current = "";
     };
+    const applyProfileEnvelope = useCallback((envelope: { profile: SavedProfile; revision: number }) => {
+        applySaved(envelope.profile);
+        profileRevisionRef.current = envelope.revision;
+        lastSyncedProfileRef.current = JSON.stringify(envelope.profile);
+        setProfileLoaded(true);
+    }, []);
+    const loadOnlineProfile = useCallback(async (target: LocalPlayer, localProfile?: SavedProfile | null) => {
+        const response = await fetch("/api/profile", { credentials: "same-origin", cache: "no-store" });
+        if (!response.ok) throw new Error("Profile database unavailable");
+        let envelope = await response.json() as { profile: SavedProfile; revision: number } | null;
+        if (!envelope) {
+            const imported = await fetch("/api/profile", {
+                method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "import", profile: localProfile ?? null }),
+            });
+            if (!imported.ok) throw new Error("Profile import failed");
+            envelope = await imported.json() as { profile: SavedProfile; revision: number };
+        }
+        applyProfileEnvelope(envelope);
+        window.localStorage.setItem(`sumobot-profile:${target.handle}`, JSON.stringify(envelope.profile));
+    }, [applyProfileEnvelope]);
     useEffect(() => {
         const controller = new AbortController();
         void fetch("/api/auth", { credentials: "same-origin", cache: "no-store", signal: controller.signal })
             .then(async (response) => response.ok ? response.json() as Promise<{ user: LocalPlayer | null }> : { user: null })
-            .then(({ user }) => {
+            .then(async ({ user }) => {
                 if (!user) return;
+                let localProfile: SavedProfile | null = null;
                 try {
                     const profileRaw = window.localStorage.getItem(`sumobot-profile:${user.handle}`);
-                    applySaved(profileRaw ? JSON.parse(profileRaw) as SavedProfile : null);
+                    localProfile = profileRaw ? JSON.parse(profileRaw) as SavedProfile : null;
                 } catch {
                     showToast("Your device profile could not be read, so defaults were loaded.");
                 }
                 setPlayer(user);
+                try { await loadOnlineProfile(user, localProfile); }
+                catch { if (localProfile) applySaved(localProfile); showToast("Online profile is unavailable; using the device cache."); }
             })
             .catch(() => undefined);
         return () => controller.abort();
-    }, []);
+    }, [loadOnlineProfile]);
     useEffect(() => {
         const controller = new AbortController();
         void Promise.all([
@@ -290,7 +324,25 @@ export function SumobotApp() {
             return;
         const saved: SavedProfile = { bots, scripts, analytics, battleHistory, owned, gold, xp, campaignCompleted };
         window.localStorage.setItem(`sumobot-profile:${player.handle}`, JSON.stringify(saved));
-    }, [analytics, battleHistory, bots, campaignCompleted, gold, owned, player, scripts, xp]);
+        if (!profileLoaded) return;
+        const serialized = JSON.stringify(saved);
+        if (serialized === lastSyncedProfileRef.current) return;
+        const timer = window.setTimeout(() => {
+            void fetch("/api/profile", {
+                method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ profile: saved, revision: profileRevisionRef.current }),
+            }).then(async (response) => {
+                const payload = await response.json() as { profile: SavedProfile; revision: number };
+                if (!payload.profile) return;
+                if (response.status === 409) applyProfileEnvelope(payload);
+                else {
+                    profileRevisionRef.current = payload.revision;
+                    lastSyncedProfileRef.current = JSON.stringify(payload.profile);
+                }
+            }).catch(() => undefined);
+        }, 700);
+        return () => window.clearTimeout(timer);
+    }, [analytics, applyProfileEnvelope, battleHistory, bots, campaignCompleted, gold, owned, player, profileLoaded, scripts, xp]);
     const protectedViews: View[] = ["play", "campaign", "hangar", "market", "lab"];
     const navigate = (next: View) => {
         if (!player && protectedViews.includes(next)) {
@@ -321,13 +373,16 @@ export function SumobotApp() {
                 return;
             }
             const nextPlayer = payload.user;
+            let localProfile: SavedProfile | null = null;
             try {
                 const raw = window.localStorage.getItem(`sumobot-profile:${nextPlayer.handle}`);
-                applySaved(raw ? JSON.parse(raw) as SavedProfile : null);
+                localProfile = raw ? JSON.parse(raw) as SavedProfile : null;
             } catch {
                 showToast("Your device profile could not be read, so defaults were loaded.");
             }
             setPlayer(nextPlayer);
+            try { await loadOnlineProfile(nextPlayer, localProfile); }
+            catch { if (localProfile) applySaved(localProfile); showToast("Online profile is unavailable; using the device cache."); }
             setAccessCode("");
             setLoginOpen(false);
             if (pendingView) setView(pendingView);
@@ -389,19 +444,19 @@ export function SumobotApp() {
         showToast(`${item.name} equipped on ${bot.name}.`);
     };
     const clearSlot = (slot: CosmeticSlot) => hangarBot && updateBot(hangarBot.id, { loadout: { ...hangarBot.loadout, [slot]: null } });
-    const buyOrEquip = (item: (typeof marketItems)[number]) => {
+    const buyOrEquip = async (item: (typeof marketItems)[number]) => {
         if (owned.includes(item.id)) {
             setMarketEquipItemId(item.id);
             return;
         }
-        if (gold < item.price) {
-            showToast("Not enough gold yet.");
-            return;
-        }
-        setGold((value) => value - item.price);
-        setOwned((items) => [...items, item.id]);
-        setMarketEquipItemId(item.id);
-        showToast(`${item.name} purchased. Choose a bot to equip it.`);
+        try {
+            const response = await fetch("/api/profile", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "purchase", itemId: item.id }) });
+            const payload = await response.json() as { profile?: SavedProfile; revision?: number; error?: string };
+            if (!response.ok || !payload.profile || typeof payload.revision !== "number") { showToast(payload.error ?? "Purchase failed."); return; }
+            applyProfileEnvelope({ profile: payload.profile, revision: payload.revision });
+            setMarketEquipItemId(item.id);
+            showToast(`${item.name} purchased. Choose a bot to equip it.`);
+        } catch { showToast("The online market is temporarily unavailable."); }
     };
     const selectScript = (script: SavedScript) => { setSelectedScriptId(script.id); setScriptName(script.name); setScriptDraft(script.source); setScriptStatus(`Loaded ${script.name}`); };
     const saveScript = (asCopy: boolean) => {
@@ -495,9 +550,11 @@ export function SumobotApp() {
             method: "POST",
             credentials: "same-origin",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id: logId, botId: battleBot.id, botName: battleBot.name, controlMode: mode, battleMode: battleType, result, telemetry, replay, playedAt }),
+            body: JSON.stringify({ id: logId, botId: battleBot.id, botName: battleBot.name, scriptId: mode === "script" ? battleBot.scriptId : null, controlMode: mode, battleMode: battleType, result, telemetry, replay, playedAt, campaign: campaignBattle }),
         }).then(async (response) => {
             if (!response.ok) throw new Error("Match recording failed");
+            const matchPayload = await response.json() as { profile?: SavedProfile; revision?: number };
+            if (matchPayload.profile && typeof matchPayload.revision === "number") applyProfileEnvelope({ profile: matchPayload.profile, revision: matchPayload.revision });
             const leaderboardResponse = await fetch("/api/leaderboard", { cache: "no-store" });
             const payload = await leaderboardResponse.json() as { entries: DatabaseLeaderboardEntry[] };
             setDatabaseLeaderboard(payload.entries ?? []);
@@ -575,6 +632,30 @@ export function SumobotApp() {
             .map((entry, index) => ({ ...entry, player: entry.playerId === player?.id ? "You" : entry.player, record: `${entry.wins}W · ${entry.draws}D · ${entry.losses}L`, rank: index + 1 }));
     }, [databaseLeaderboard, leaderboardBattleMode, leaderboardMode, player]);
     const battleSource = practiceBattle ? scriptDraft : attachedScript.source;
+    const onlineBots = useMemo<OnlineBotSelection[]>(() => bots.map((bot) => ({
+        id: bot.id,
+        name: bot.name,
+        skill: bot.skill,
+        scriptSource: scripts.find((script) => script.id === bot.scriptId)?.source ?? "",
+        appearance: appearanceFor(bot),
+    })), [bots, scripts]);
+    const refreshOnlineData = useCallback(async () => {
+        if (!player) return;
+        try {
+            const [profileResponse, leaderboardResponse] = await Promise.all([
+                fetch("/api/profile", { credentials: "same-origin", cache: "no-store" }),
+                fetch("/api/leaderboard", { cache: "no-store" }),
+            ]);
+            if (profileResponse.ok) {
+                const envelope = await profileResponse.json() as { profile: SavedProfile; revision: number } | null;
+                if (envelope) applyProfileEnvelope(envelope);
+            }
+            if (leaderboardResponse.ok) {
+                const payload = await leaderboardResponse.json() as { entries: DatabaseLeaderboardEntry[] };
+                setDatabaseLeaderboard(payload.entries ?? []);
+            }
+        } catch { showToast("Online results will refresh when the connection recovers."); }
+    }, [applyProfileEnvelope, player]);
     const visibleNavItems = player ? navItems : navItems.filter((item) => item.id === "home" || item.id === "leaderboard");
     const playerRecordStyle = { "--analytics-empty-display": analyticSummary.matches === 0 ? "block" : "none" } as CSSProperties;
     const battleLogPanel = <section className="battle-log-section" aria-labelledby="battle-log-title">
@@ -659,11 +740,11 @@ export function SumobotApp() {
     {view === "home" && homePanel}
 
     {view === "play" &&
-<section className="content-page page-width play-page">{battleActive ? <><div className="battle-page-heading"><button type="button" onClick={() => { setBattleActive(false); if (practiceBattle)
+<section className="content-page page-width play-page">{battleActive ? (battleType === "pvp" && onlineRoomId ? <OnlineBattleRoom roomId={onlineRoomId} bots={onlineBots} selectedBotId={battleBot.id} onExit={() => { setOnlineRoomId(null); setBattleActive(false); void refreshOnlineData(); }} onProfileChanged={() => void refreshOnlineData()} /> : <><div className="battle-page-heading"><button type="button" onClick={() => { setBattleActive(false); if (practiceBattle)
         setView("lab"); }}>Back to setup</button><span>{practiceBattle ? "Unrecorded Lab test" : `${battleType === "pvai" ? "vs AI" : "vs Player"} | ${roundSeconds}s | ${actionIntervalMs}ms tick`}</span></div><BattleArena key={`${battleBot.id}-${mode}-${practiceBattle}`} mode={mode} playerSkill={battleBot.skill} playerBotName={battleBot.name} playerAppearance={appearanceFor(battleBot)} scriptSource={battleSource} roundSeconds={roundSeconds} actionIntervalMs={actionIntervalMs} battleType={battleType} practice={practiceBattle} onExit={() => { setBattleActive(false); if (practiceBattle)
-        setView("lab"); }} onMatchComplete={finishBattle} onApplyScript={practiceBattle ? applyLabBattleScript : undefined}/></> : <><div className="page-intro"><div><span className="eyebrow">Battle configuration</span><h1>Build the match.</h1><p>Select your bot, input mode, round timer, and game tick.</p></div></div><span className="config-section-label">BATTLE MODE</span><div className="battle-type-grid"><button type="button" className={battleType === "pvai" ? "active" : ""} onClick={() => setBattleType("pvai")}><span>AI</span><strong>vs AI</strong><p>Practice against the slower Pebble bot.</p></button><button type="button" className="coming-soon" disabled><span>2P</span><strong>vs Player</strong><p>Coming soon</p></button></div><div className="battle-config-panel"><div className="config-group"><span>1. SELECT BOT</span><div className="config-bot-list">{bots.map((bot) => <button type="button" key={bot.id} className={battleBot.id === bot.id ? "active" : ""} onClick={() => setBattleBotId(bot.id)}>
+        setView("lab"); }} onMatchComplete={finishBattle} onApplyScript={practiceBattle ? applyLabBattleScript : undefined}/></>) : <><div className="page-intro"><div><span className="eyebrow">Battle configuration</span><h1>Build the match.</h1><p>Select your bot, input mode, round timer, and game tick.</p></div></div><span className="config-section-label">BATTLE MODE</span><div className="battle-type-grid"><button type="button" className={battleType === "pvai" ? "active" : ""} onClick={() => setBattleType("pvai")}><span>AI</span><strong>vs AI</strong><p>Practice against the slower Pebble bot.</p></button><button type="button" className={battleType === "pvp" ? "active" : ""} onClick={() => setBattleType("pvp")}><span>2P</span><strong>vs Player</strong><p>Authoritative online rooms.</p></button></div><div className="battle-config-panel"><div className="config-group"><span>1. SELECT BOT</span><div className="config-bot-list">{bots.map((bot) => <button type="button" key={bot.id} className={battleBot.id === bot.id ? "active" : ""} onClick={() => setBattleBotId(bot.id)}>
       <span className="config-bot-visual"><BotVisual name={bot.name} skill={bot.skill} appearance={appearanceFor(bot)} variant="compact"/></span>
-      <strong>{bot.name}</strong><small className={`config-script-label ${bot.scriptId ? "attached" : "empty"}`}>{scripts.find((item) => item.id === bot.scriptId)?.name ?? "No script"}</small><span className={`config-skill-badge ${bot.skill}`}><i>{bot.skill === "boost" ? "B" : "S"}</i><span><strong>{bot.skill === "boost" ? "BOOST" : "STONE"}</strong><small>{bot.skill === "boost" ? "Speed ×1.5" : "Reflect ×2"}</small></span></span></button>)}</div></div><div className="config-group"><span>2. INPUT MODE</span><div className="config-options">{(Object.keys(modeCopy) as ControlMode[]).map((id) => <button type="button" key={id} className={mode === id ? "active" : ""} onClick={() => setMode(id)}><strong>{modeCopy[id].title}</strong><small>{modeCopy[id].description}</small></button>)}</div></div><div className="config-split"><div className="config-group"><span>3. ROUND TIMER</span><div className="segmented-control">{[30, 60, 120].map((value) => <button type="button" key={value} className={roundSeconds === value ? "active" : ""} onClick={() => { setRoundSeconds(value); }}>{value}s</button>)}</div></div><div className="config-group"><span>4. GAME TICK</span><div className="tick-control"><div className="segmented-control">{[100, 250, 500].map((value) => <button type="button" key={value} className={actionIntervalMs === value ? "active" : ""} onClick={() => { setActionIntervalMs(value); setCustomTick(String(value)); }}>{value}ms</button>)}</div><label><span>CUSTOM</span><input type="number" min="50" max="3000" step="10" value={customTick} onChange={(event) => setCustomTick(event.target.value)} onBlur={applyCustomTick} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} aria-label="Custom game tick in milliseconds"/><small>ms</small></label></div></div></div>{mode === "script" && <div className={`attached-script-notice ${battleBot.scriptId ? "ready" : "missing"}`}><strong>{battleBot.scriptId ? `Attached: ${attachedScript.name}` : "No script attached"}</strong><span>{battleBot.scriptId ? "A temporary copy can be edited during this battle." : "Open Hangar and attach a saved Lab script before starting Script Pilot."}</span></div>}<button className="button button-primary battle-launch" type="button" onClick={() => startBattle(false)}>START BATTLE &gt;</button></div></>}</section>}
+      <strong>{bot.name}</strong><small className={`config-script-label ${bot.scriptId ? "attached" : "empty"}`}>{scripts.find((item) => item.id === bot.scriptId)?.name ?? "No script"}</small><span className={`config-skill-badge ${bot.skill}`}><i>{bot.skill === "boost" ? "B" : "S"}</i><span><strong>{bot.skill === "boost" ? "BOOST" : "STONE"}</strong><small>{bot.skill === "boost" ? "Speed ×1.5" : "Reflect ×2"}</small></span></span></button>)}</div></div><div className="config-group"><span>2. INPUT MODE</span><div className="config-options">{(Object.keys(modeCopy) as ControlMode[]).map((id) => <button type="button" key={id} className={mode === id ? "active" : ""} onClick={() => setMode(id)}><strong>{modeCopy[id].title}</strong><small>{modeCopy[id].description}</small></button>)}</div></div><div className="config-split"><div className="config-group"><span>3. ROUND TIMER</span><div className="segmented-control">{[30, 60, 120].map((value) => <button type="button" key={value} className={roundSeconds === value ? "active" : ""} onClick={() => { setRoundSeconds(value); }}>{value}s</button>)}</div></div><div className="config-group"><span>4. GAME TICK</span><div className="tick-control"><div className="segmented-control">{[100, 250, 500].map((value) => <button type="button" key={value} className={actionIntervalMs === value ? "active" : ""} onClick={() => { setActionIntervalMs(value); setCustomTick(String(value)); }}>{value}ms</button>)}</div><label><span>CUSTOM</span><input type="number" min="50" max="3000" step="10" value={customTick} onChange={(event) => setCustomTick(event.target.value)} onBlur={applyCustomTick} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} aria-label="Custom game tick in milliseconds"/><small>ms</small></label></div></div></div>{mode === "script" && <div className={`attached-script-notice ${battleBot.scriptId ? "ready" : "missing"}`}><strong>{battleBot.scriptId ? `Attached: ${attachedScript.name}` : "No script attached"}</strong><span>{battleBot.scriptId ? "The authoritative server executes the attached script for online matches." : "Open Hangar and attach a saved Lab script before starting Script Pilot."}</span></div>}{battleType === "pvai" && <button className="button button-primary battle-launch" type="button" onClick={() => startBattle(false)}>START BATTLE &gt;</button>}</div>{battleType === "pvp" && <OnlineRoomBrowser bots={onlineBots} selectedBotId={battleBot.id} mode={mode} roundSeconds={roundSeconds} actionIntervalMs={actionIntervalMs} onJoined={(roomId, roomMode) => { setMode(roomMode); setOnlineRoomId(roomId); setBattleType("pvp"); setBattleActive(true); }} />}</>}</section>}
 
     {view === "campaign" && <section className="content-page page-width"><div className="page-intro campaign-intro"><div><span className="eyebrow">Training pathway</span><h1>From pilot to programmer.</h1><p>Campaign battles use your currently selected bot; input mode is chosen by the lesson.</p></div><div className="campaign-total"><strong>{campaignCompleted ? "25%" : "18%"}</strong><span>CAMPAIGN COMPLETE</span></div></div><div className="campaign-path">{campaignChapters.map((chapter, index) => { const unlocked = index === 0 || (index === 1 && campaignCompleted); const completed = index === 0 && campaignCompleted; return <article key={chapter.number} className={`chapter-card ${completed ? "completed" : unlocked ? "active" : "locked"}`}><div className="chapter-index">{chapter.number}</div><div className="chapter-body"><span className="eyebrow">{chapter.mode}</span><h2>{chapter.title}</h2><p>{chapter.description}</p><div className="lesson-list">{chapter.lessons.map((lesson, lessonIndex) => <span key={lesson} className={(completed || (index === 0 && lessonIndex < 3)) ? "done" : ""}><i>{lessonIndex + 1}</i>{lesson}</span>)}</div><div className="chapter-footer"><span>{chapter.reward}</span>{unlocked ? <button type="button" onClick={() => startCampaignBattle(index === 0 ? "buttons" : "live")}>{completed ? "Replay battle" : "Start lesson battle ->"}</button> : <strong>Locked</strong>}</div></div>{index < campaignChapters.length - 1 && <div className="path-line"/>}</article>; })}</div></section>}
 
@@ -695,7 +776,7 @@ export function SumobotApp() {
       <section className="content-page page-width market-page"><div className="page-intro"><div><span className="eyebrow">Cosmetic market</span><h1>Make every bot distinct.</h1><p>Equip your bot with the killer looks.</p></div><div className="wallet-card"><small>YOUR BALANCE</small><strong><i className="coin-icon"/> {gold}</strong></div></div><div className="market-filter"><span>Category</span>{(["all", "wheel", "body", "face", "accessory"] as const).map((filter) => <button type="button" key={filter} className={marketFilter === filter ? "active" : ""} onClick={() => setMarketFilter(filter)}>{filter}</button>)}</div><div className="market-scroll"><div className="market-grid">{filteredMarketItems.map((item) => { const isOwned = owned.includes(item.id), equippedBots = bots.filter((bot) => bot.loadout[item.slot] === item.id); return <article className={`market-card ${equippedBots.length ? "equipped" : ""}`} key={item.id}><div className="market-art" style={{ "--item-color": item.color } as CSSProperties}><span className={`cosmetic-shape ${item.slot}`}/><small>{item.slot}</small></div><div className="market-info"><span>{item.rarity}</span><h2>{item.name}</h2><button className={isOwned ? "owned" : ""} type="button" onClick={() => buyOrEquip(item)}>{isOwned ? equippedBots.length ? `Equip · ${equippedBots.length} bot${equippedBots.length === 1 ? "" : "s"}` : "Equip" : <><i className="coin-icon"/> {item.price}</>}</button></div></article>; })}</div></div></section>}
     {marketEquipItem && <div className="equip-prompt-backdrop"><section className="equip-prompt" role="dialog" aria-modal="true" aria-label={`Equip ${marketEquipItem.name}`}><button type="button" className="equip-prompt-close" onClick={() => setMarketEquipItemId(null)}>×</button><span className="eyebrow">Choose a bot</span><h2>Equip {marketEquipItem.name}</h2><p>This changes only the {marketEquipItem.slot} slot.</p><div>{bots.map((bot) => <button type="button" key={bot.id} onClick={() => equipItemOnBot(marketEquipItem.id, bot.id)}><strong>{bot.name}</strong><small>{bot.loadout[marketEquipItem.slot] === marketEquipItem.id ? "Currently equipped" : `Equip ${marketEquipItem.slot}`}</small></button>)}</div></section></div>}
 
-    {view === "leaderboard" && <section className="content-page page-width"><div className="page-intro ranks-intro"><div><span className="eyebrow">Rankings</span><h1>Every claimed match counts.</h1><p>Win +1.00 | Draw +0.50 | Loss +0.25.</p></div><div className="rank-filters"><div><small>BATTLE MODE</small><div className="segmented-control"><button type="button" className={leaderboardBattleMode === "pvai" ? "active" : ""} onClick={() => setLeaderboardBattleMode("pvai")}>vs AI</button><button type="button" className={`${leaderboardBattleMode === "pvp" ? "active " : ""}coming-soon`} onClick={() => setLeaderboardBattleMode("pvp")}>vs Player · coming soon</button></div></div><div><small>INPUT MODE</small><div className="segmented-control">{(["all", "buttons", "live", "script"] as const).map((filter) => <button type="button" key={filter} className={leaderboardMode === filter ? "active" : ""} onClick={() => setLeaderboardMode(filter)}>{filter}</button>)}</div></div></div></div><div className="leaderboard-table"><div className="table-head"><span>Rank</span><span>Competitor</span><span>Mode</span><span>Record</span><span>Points</span></div>{filteredLeaderboard.length ? filteredLeaderboard.map((entry) => <div className={`table-row ${entry.player === "You" ? "you" : ""}`} key={`${entry.playerId}-${entry.botId}-${entry.mode}`}><strong>#{entry.rank}</strong><span><i>{entry.player.slice(0, 2).toUpperCase()}</i><span><small>{entry.player}</small><strong>{entry.bot}</strong></span></span><span className={`table-mode ${entry.mode}`}>{modeCopy[entry.mode].title}</span><code>{entry.record}</code><strong>{entry.points.toFixed(2)}</strong></div>) : <div className="leaderboard-empty"><strong>{leaderboardBattleMode === "pvp" ? "vs Player is coming soon." : "No recorded rankings yet."}</strong><span>{leaderboardBattleMode === "pvp" ? "This mode intentionally has no ranking data yet." : "Complete a claimed vs AI battle to create the first database ranking."}</span></div>}</div></section>}
+    {view === "leaderboard" && <section className="content-page page-width"><div className="page-intro ranks-intro"><div><span className="eyebrow">Rankings</span><h1>Every claimed match counts.</h1><p>Win +1.00 | Draw +0.50 | Loss +0.25.</p></div><div className="rank-filters"><div><small>BATTLE MODE</small><div className="segmented-control"><button type="button" className={leaderboardBattleMode === "pvai" ? "active" : ""} onClick={() => setLeaderboardBattleMode("pvai")}>vs AI</button><button type="button" className={leaderboardBattleMode === "pvp" ? "active" : ""} onClick={() => setLeaderboardBattleMode("pvp")}>vs Player</button></div></div><div><small>INPUT MODE</small><div className="segmented-control">{(["all", "buttons", "live", "script"] as const).map((filter) => <button type="button" key={filter} className={leaderboardMode === filter ? "active" : ""} onClick={() => setLeaderboardMode(filter)}>{filter}</button>)}</div></div></div></div><div className="leaderboard-table"><div className="table-head"><span>Rank</span><span>Competitor</span><span>Mode</span><span>Record</span><span>Points</span></div>{filteredLeaderboard.length ? filteredLeaderboard.map((entry) => <div className={`table-row ${entry.player === "You" ? "you" : ""}`} key={`${entry.playerId}-${entry.botId}-${entry.mode}`}><strong>#{entry.rank}</strong><span><i>{entry.player.slice(0, 2).toUpperCase()}</i><span><small>{entry.player}</small><strong>{entry.bot}</strong></span></span><span className={`table-mode ${entry.mode}`}>{modeCopy[entry.mode].title}</span><code>{entry.record}</code><strong>{entry.points.toFixed(2)}</strong></div>) : <div className="leaderboard-empty"><strong>No recorded rankings yet.</strong><span>Complete an online or AI battle to create the first ranking in this queue.</span></div>}</div></section>}
 
     {view === "lab" && selectedScript && <section className="content-page page-width lab-page">
       <div className="page-intro"><div><span className="eyebrow">Script library & evidence</span><h1>Build. Test. Inspect.</h1><p>Write familiar code, attach it to bots, and inspect data from real claimed Script battles.</p></div><button className="button button-primary" type="button" onClick={startLabTest}>TEST RUN &gt;</button></div>

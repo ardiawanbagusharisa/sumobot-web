@@ -201,3 +201,50 @@ export const analyticsSummaries = sqliteTable("analytics_summaries", {
   trajectoryGrid: text("trajectory_grid", { mode: "json" }).$type<number[]>().notNull(),
   processedAt: text("processed_at").notNull(),
 }, (table) => [uniqueIndex("idx_analytics_match_participant").on(table.matchId, table.participantId)]);
+
+export const onlineProfiles = sqliteTable("online_profiles", {
+  playerId: text("player_id").primaryKey().references(() => players.id),
+  profile: text("profile", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  revision: integer("revision").notNull().default(1),
+  importedAt: text("imported_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const onlineRooms = sqliteTable("online_rooms", {
+  id: text("id").primaryKey(),
+  isPrivate: integer("is_private", { mode: "boolean" }).notNull().default(false),
+  accessCodeHash: text("access_code_hash"),
+  status: text("status", { enum: ["waiting", "countdown", "live", "completed"] }).notNull().default("waiting"),
+  controlMode: text("control_mode", { enum: ["buttons", "live", "script"] }).notNull(),
+  roundSeconds: integer("round_seconds").notNull(),
+  actionIntervalMs: integer("action_interval_ms").notNull(),
+  hostPlayerId: text("host_player_id").notNull().references(() => players.id),
+  guestPlayerId: text("guest_player_id").references(() => players.id),
+  hostPlayer: text("host_player", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  guestPlayer: text("guest_player", { mode: "json" }).$type<Record<string, unknown>>(),
+  hostReady: integer("host_ready", { mode: "boolean" }).notNull().default(false),
+  guestReady: integer("guest_ready", { mode: "boolean" }).notNull().default(false),
+  hostSetupDeadline: integer("host_setup_deadline"),
+  guestSetupDeadline: integer("guest_setup_deadline"),
+  countdownStartedAt: integer("countdown_started_at"),
+  matchState: text("match_state", { mode: "json" }).$type<Record<string, unknown>>(),
+  winnerPlayerId: text("winner_player_id").references(() => players.id),
+  completionReason: text("completion_reason", { enum: ["arena_exit", "draw_timeout", "disconnect"] }),
+  lastHostSeenAt: integer("last_host_seen_at").notNull(),
+  lastGuestSeenAt: integer("last_guest_seen_at"),
+  version: integer("version").notNull().default(1),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  completedAt: text("completed_at"),
+}, (table) => [
+  index("idx_online_rooms_status_updated").on(table.status, table.updatedAt),
+  index("idx_online_rooms_access_code").on(table.accessCodeHash),
+]);
+
+export const onlineRewardClaims = sqliteTable("online_reward_claims", {
+  id: text("id").primaryKey(),
+  roomId: text("room_id").notNull().references(() => onlineRooms.id),
+  playerId: text("player_id").notNull().references(() => players.id),
+  result: text("result", { enum: ["win", "draw", "loss"] }).notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [uniqueIndex("idx_online_reward_room_player").on(table.roomId, table.playerId)]);

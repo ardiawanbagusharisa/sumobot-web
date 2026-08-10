@@ -38,6 +38,18 @@ test("FSM template keeps script-defined state between ticks", () => {
   assert.deepEqual(strategy.decide({ game: game({ self: { distanceFromCenter: 30, angleToCenter: 0, dashReady: true, skillReady: false, skill: "boost" }, enemy: closeEnemy }) }), { name: "dash" });
 });
 
+test("script state snapshots survive an authoritative server handoff", () => {
+  const firstWorker = runtime.createScriptRuntime(rules.FSM_SCRIPT);
+  const closeEnemy = { distance: 1, angle: 0, stunned: false, stone: false };
+  assert.deepEqual(firstWorker.decide({ game: game({ enemy: closeEnemy }) }), { name: "skill" });
+  const snapshot = firstWorker.snapshot();
+  assert.equal(snapshot.state, "attack");
+
+  const nextWorker = runtime.createScriptRuntime(rules.FSM_SCRIPT);
+  nextWorker.restore(snapshot);
+  assert.deepEqual(nextWorker.decide({ game: game({ self: { distanceFromCenter: 30, angleToCenter: 0, dashReady: true, skillReady: false, skill: "boost" }, enemy: closeEnemy }) }), { name: "dash" });
+});
+
 test("legacy JSON strategies migrate without discarding their rules", () => {
   const legacy = JSON.stringify({ version: 1, initialState: "pilot", states: { pilot: [
     { when: "game.enemy.angle > 8", do: "turnright(0.1)" },

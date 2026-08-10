@@ -1,6 +1,8 @@
 import { getDatabase } from "@/lib/db/server";
 import { ensureAuthSchema, type AuthUser } from "@/lib/auth/server";
 import { HOME_DEMO_META, HOME_DEMO_REPLAY } from "@/lib/game/demo-replay";
+import { CAMPAIGN_REWARD_RULES, MATCH_OUTCOME_RULES } from "@/lib/game/rules";
+import { getOnlineProfile, importOnlineProfile } from "@/lib/profile/server";
 
 type ControlMode = "buttons" | "live" | "script";
 type BattleMode = "pvai" | "pvp";
@@ -10,12 +12,14 @@ export interface MatchSubmission {
   id: string;
   botId: string;
   botName: string;
+  scriptId?: string | null;
   controlMode: ControlMode;
   battleMode: BattleMode;
   result: MatchResult;
   telemetry: Record<string, unknown>;
   replay: Record<string, unknown>;
   playedAt: string;
+  campaign?: boolean;
 }
 
 export interface DatabaseLeaderboardEntry {
@@ -31,7 +35,6 @@ export interface DatabaseLeaderboardEntry {
   points: number;
 }
 
-const POINTS: Record<MatchResult, number> = { win: 1, draw: .5, loss: .25 };
 let schemaReady = false;
 
 export async function ensureMatchSchema() {
@@ -96,11 +99,46 @@ export async function recordMatch(user: AuthUser, submission: MatchSubmission) {
   const d1 = await getDatabase();
   const replayJson = JSON.stringify(submission.replay);
   const telemetryJson = JSON.stringify(submission.telemetry);
-  const points = POINTS[submission.result];
+  const rule = MATCH_OUTCOME_RULES[submission.result];
+  const points = rule.rankPoints;
   const updatedAt = new Date().toISOString();
+  const current = await getOnlineProfile(user.id) ?? await importOnlineProfile(user, null);
+  const campaignBonus = Boolean(submission.campaign && !current.profile.campaignCompleted);
+  const rewards = {
+    xp: rule.rewards.xp + (campaignBonus ? CAMPAIGN_REWARD_RULES.firstCompletion.xp : 0),
+    gold: rule.rewards.gold + (campaignBonus ? CAMPAIGN_REWARD_RULES.firstCompletion.gold : 0),
+  };
+  const historyEntry = {
+    id: submission.id,
+    result: submission.result,
+    mode: submission.controlMode,
+    battleType: submission.battleMode,
+    botId: submission.botId,
+    scriptId: submission.controlMode === "script" ? submission.scriptId ?? null : null,
+    playedAt: submission.playedAt,
+    telemetry: submission.telemetry,
+    replay: submission.replay,
+  };
+  const nextAnalytics = submission.controlMode === "script" && submission.scriptId
+    ? { ...current.profile.analytics, [submission.scriptId]: [...(current.profile.analytics[submission.scriptId] ?? []).filter((entry) => entry && typeof entry === "object" && (entry as { id?: unknown }).id !== submission.id), { id: submission.id, result: submission.result, playedAt: submission.playedAt, telemetry: submission.telemetry }].slice(-30) }
+    : current.profile.analytics;
+  const nextProfile = {
+    ...current.profile,
+    xp: current.profile.xp + rewards.xp,
+    gold: current.profile.gold + rewards.gold,
+    campaignCompleted: current.profile.campaignCompleted || campaignBonus,
+    analytics: nextAnalytics,
+    battleHistory: [...current.profile.battleHistory.filter((entry) => entry.id !== submission.id), historyEntry].slice(-50),
+  };
   const pool = await d1.prepare("SELECT slot FROM featured_replays WHERE slot LIKE 'home-%' ORDER BY updated_at ASC").all<{ slot: string }>();
   const targetSlot = pool.results.length < 3 ? `home-${pool.results.length + 1}` : pool.results[0].slot;
   await d1.batch([
+    d1.prepare(`UPDATE online_profiles SET profile = ?, revision = revision + 1, updated_at = ?
+      WHERE player_id = ? AND NOT EXISTS (SELECT 1 FROM prototype_match_records WHERE id = ?)`)
+      .bind(JSON.stringify(nextProfile), updatedAt, user.id, submission.id),
+    d1.prepare(`UPDATE players SET total_xp = total_xp + ?, gold_balance = gold_balance + ?, updated_at = ?
+      WHERE id = ? AND NOT EXISTS (SELECT 1 FROM prototype_match_records WHERE id = ?)`)
+      .bind(rewards.xp, rewards.gold, updatedAt, user.id, submission.id),
     d1.prepare(`INSERT INTO prototype_match_records
       (id, player_id, player_handle, bot_id, bot_name, control_mode, battle_mode, result, rank_points, telemetry, replay, played_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -111,7 +149,7 @@ export async function recordMatch(user: AuthUser, submission: MatchSubmission) {
       result = excluded.result, played_at = excluded.played_at, updated_at = excluded.updated_at`)
       .bind(targetSlot, submission.id, replayJson, submission.result, submission.playedAt, updatedAt),
   ]);
-  return { id: submission.id, points };
+  return { id: submission.id, points, rewards, profile: nextProfile, revision: current.revision + 1 };
 }
 
 export async function getFeaturedReplays() {
@@ -150,11 +188,13 @@ export function validateMatchSubmission(value: unknown): MatchSubmission | null 
   const item = value as Partial<MatchSubmission>;
   if (typeof item.id !== "string" || !/^match-[a-zA-Z0-9-]{6,80}$/.test(item.id)) return null;
   if (typeof item.botId !== "string" || item.botId.length > 80 || typeof item.botName !== "string" || item.botName.length < 1 || item.botName.length > 24) return null;
+  if (item.scriptId !== undefined && item.scriptId !== null && (typeof item.scriptId !== "string" || item.scriptId.length > 80)) return null;
   if (!item.controlMode || !["buttons", "live", "script"].includes(item.controlMode)) return null;
   if (item.battleMode !== "pvai" || !item.result || !["win", "draw", "loss"].includes(item.result)) return null;
   if (!item.telemetry || typeof item.telemetry !== "object" || !item.replay || typeof item.replay !== "object") return null;
   const replayJson = JSON.stringify(item.replay);
   if (replayJson.length > 750_000) return null;
   if (typeof item.playedAt !== "string" || item.playedAt.length > 80) return null;
+  if (item.campaign !== undefined && typeof item.campaign !== "boolean") return null;
   return item as MatchSubmission;
 }

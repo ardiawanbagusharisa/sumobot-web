@@ -10,7 +10,7 @@
     "build": "vinext build",
     "start": "vinext start",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs tests/script-runtime.test.mjs",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs tests/script-runtime.test.mjs tests/online-simulation.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },
