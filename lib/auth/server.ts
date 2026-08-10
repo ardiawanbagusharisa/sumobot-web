@@ -2,7 +2,10 @@ import { getDatabase } from "@/lib/db/server";
 
 const SESSION_COOKIE = "sumobot_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
-const PASSWORD_ITERATIONS = 210_000;
+// Sites' production Web Crypto runtime caps PBKDF2 at 100,000 iterations.
+// Store the work factor with every credential so it can be raised safely when
+// the runtime limit changes without invalidating existing accounts.
+const PASSWORD_ITERATIONS = 100_000;
 
 export interface AuthUser {
   id: string;
