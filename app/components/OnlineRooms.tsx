@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from "react";
-import type { ControlMode } from "@/lib/game/rules";
-import type { OnlineActionName, OnlineBotSelection, OnlineRoomSummary, OnlineRoomView, RoomSide } from "@/lib/online/types";
+import { GAME_RULES, type ControlMode } from "@/lib/game/rules";
+import type { OnlineActionName, OnlineActionResult, OnlineBotSelection, OnlineRoomSummary, OnlineRoomView, RoomSide } from "@/lib/online/types";
 import { ONLINE_ARENA } from "@/lib/online/simulation";
 import { BotVisual } from "./BotVisual";
 
@@ -15,16 +15,36 @@ interface OnlineRoomBrowserProps {
   onJoined: (roomId: string, mode: ControlMode) => void;
 }
 
-async function roomRequest(body: Record<string, unknown>) {
+interface RoomMutationResponse {
+  room: OnlineRoomView;
+  actionResult?: OnlineActionResult;
+}
+
+async function roomRequest(body: Record<string, unknown>): Promise<RoomMutationResponse> {
   const response = await fetch("/api/rooms", {
     method: "POST",
     credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  const payload = await response.json() as { room?: OnlineRoomView; error?: string };
+  const payload = await response.json() as { room?: OnlineRoomView; actionResult?: OnlineActionResult; error?: string };
   if (!response.ok || !payload.room) throw new Error(payload.error ?? "Room request failed.");
-  return payload.room;
+  return { room: payload.room, actionResult: payload.actionResult };
+}
+
+const ACTION_REJECTION_COPY: Record<NonNullable<OnlineActionResult["reason"]>, string> = {
+  interval: "waiting for the next action tick",
+  stunned: "bot is stunned",
+  stone_locked: "Stone is active",
+  dash_cooldown: "dash is cooling down",
+  skill_cooldown: "skill is cooling down",
+  queue_full: "command queue is full",
+};
+
+function actionFeedback(result: OnlineActionResult) {
+  if (result.queued) return `${result.name} queued for the next available tick`;
+  if (result.accepted) return `${result.name} executed`;
+  return `${result.name} rejected · ${result.reason ? ACTION_REJECTION_COPY[result.reason] : "not available"}`;
 }
 
 export function OnlineRoomBrowser({ bots, selectedBotId, mode, roundSeconds, actionIntervalMs, onJoined }: OnlineRoomBrowserProps) {
@@ -34,6 +54,8 @@ export function OnlineRoomBrowser({ bots, selectedBotId, mode, roundSeconds, act
   const [createCode, setCreateCode] = useState("");
   const [joinCodes, setJoinCodes] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
+  const [joiningRoomId, setJoiningRoomId] = useState<string | null>(null);
+  const joinBusyRef = useRef(false);
   const [message, setMessage] = useState("Live room list updates automatically.");
   const selectedBot = bots.find((bot) => bot.id === selectedBotId) ?? bots[0];
 
@@ -61,7 +83,7 @@ export function OnlineRoomBrowser({ bots, selectedBotId, mode, roundSeconds, act
     if (!selectedBot) return;
     setBusy(true);
     try {
-      const room = await roomRequest({ action: "create", isPrivate: privateRoom, accessCode: createCode, controlMode: mode, roundSeconds, actionIntervalMs, bot: selectedBot });
+      const { room } = await roomRequest({ action: "create", isPrivate: privateRoom, accessCode: createCode, controlMode: mode, roundSeconds, actionIntervalMs, bot: selectedBot });
       onJoined(room.id, room.controlMode);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Unable to create room.");
@@ -69,14 +91,16 @@ export function OnlineRoomBrowser({ bots, selectedBotId, mode, roundSeconds, act
   };
 
   const joinRoom = async (room: OnlineRoomSummary) => {
-    if (!selectedBot) return;
+    if (!selectedBot || joinBusyRef.current) return;
+    joinBusyRef.current = true;
     setBusy(true);
+    setJoiningRoomId(room.id);
     try {
-      const joined = await roomRequest({ action: "join", roomId: room.id, accessCode: joinCodes[room.id], bot: selectedBot });
+      const { room: joined } = await roomRequest({ action: "join", roomId: room.id, accessCode: joinCodes[room.id], bot: selectedBot });
       onJoined(joined.id, joined.controlMode);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Unable to join room.");
-    } finally { setBusy(false); }
+    } finally { joinBusyRef.current = false; setBusy(false); setJoiningRoomId(null); }
   };
 
   const search = (event: FormEvent) => { event.preventDefault(); void refresh(query); };
@@ -109,7 +133,7 @@ export function OnlineRoomBrowser({ bots, selectedBotId, mode, roundSeconds, act
             {room.status === "waiting" && room.playerCount === 1 ? (
               <div className="room-join">
                 {room.isPrivate && <input value={joinCodes[room.id] ?? ""} onChange={(event) => setJoinCodes((codes) => ({ ...codes, [room.id]: event.target.value }))} placeholder="Room code" aria-label={`Code for room ${room.id}`} />}
-                <button type="button" disabled={busy || (room.isPrivate && !(joinCodes[room.id]?.trim()))} onClick={() => void joinRoom(room)}>Join</button>
+                <button type="button" disabled={busy || (room.isPrivate && !(joinCodes[room.id]?.trim()))} onClick={() => void joinRoom(room)}>{joiningRoomId === room.id ? "Joining…" : "Join"}</button>
               </div>
             ) : <span className="room-full">{room.playerCount}/2</span>}
           </article>
@@ -132,13 +156,22 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
   const roomRef = useRef<OnlineRoomView | null>(null);
   const heldRef = useRef<Set<OnlineActionName>>(new Set());
   const completedRef = useRef(false);
+  const pollBusyRef = useRef(false);
+  const mutationBusyRef = useRef(0);
+  const actionSequenceRef = useRef(0);
+  const actionQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const pendingHeldRef = useRef<Set<OnlineActionName>>(new Set());
   const [room, setRoom] = useState<OnlineRoomView | null>(null);
   const [botId, setBotId] = useState(selectedBotId);
   const [command, setCommand] = useState("");
+  const [commandLog, setCommandLog] = useState<string[]>(["Type help to list live commands."]);
+  const [lastActionFeedback, setLastActionFeedback] = useState("");
   const [message, setMessage] = useState("Connecting to authoritative match server…");
   const [clock, setClock] = useState(() => Date.now());
 
   const poll = useCallback(async () => {
+    if (pollBusyRef.current || mutationBusyRef.current > 0) return;
+    pollBusyRef.current = true;
     try {
       const response = await fetch(`/api/rooms?roomId=${encodeURIComponent(roomId)}`, { cache: "no-store" });
       const payload = await response.json() as { room?: OnlineRoomView; error?: string };
@@ -152,30 +185,53 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Connection interrupted.");
+    } finally {
+      pollBusyRef.current = false;
     }
   }, [onProfileChanged, roomId]);
 
   useEffect(() => {
-    const initial = window.setTimeout(() => void poll(), 0);
-    const timer = window.setInterval(() => { setClock(Date.now()); void poll(); }, room?.status === "live" ? 200 : 500);
-    return () => { window.clearTimeout(initial); window.clearInterval(timer); };
+    let cancelled = false;
+    let timer = 0;
+    const loop = async () => {
+      setClock(Date.now());
+      await poll();
+      if (!cancelled) timer = window.setTimeout(() => void loop(), room?.status === "live" ? 120 : 400);
+    };
+    void loop();
+    return () => { cancelled = true; window.clearTimeout(timer); };
   }, [poll, room?.status]);
 
   const mutate = useCallback(async (action: string, extra: Record<string, unknown> = {}) => {
+    mutationBusyRef.current += 1;
     try {
       const next = await roomRequest({ action, roomId, ...extra });
-      roomRef.current = next;
-      setRoom(next);
+      roomRef.current = next.room;
+      setRoom(next.room);
       return next;
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Action failed.");
       return null;
+    } finally {
+      mutationBusyRef.current = Math.max(0, mutationBusyRef.current - 1);
     }
   }, [roomId]);
 
-  const sendAction = useCallback((name: OnlineActionName, duration?: number) => {
-    if (roomRef.current?.status !== "live") return;
-    void mutate("action", { name, duration });
+  const sendAction = useCallback((name: OnlineActionName, duration?: number, options: { coalesce?: boolean } = {}) => {
+    if (roomRef.current?.status !== "live") return Promise.resolve<OnlineActionResult | null>(null);
+    if (options.coalesce && pendingHeldRef.current.has(name)) return Promise.resolve<OnlineActionResult | null>(null);
+    if (options.coalesce) pendingHeldRef.current.add(name);
+    const sequence = ++actionSequenceRef.current;
+    const run = async () => {
+      const response = await mutate("action", { name, duration, sequence });
+      const result = response?.actionResult ?? null;
+      if (result) setLastActionFeedback(actionFeedback(result));
+      return result;
+    };
+    const task = actionQueueRef.current.then(run, run);
+    actionQueueRef.current = task.then(() => undefined, () => undefined);
+    void task.finally(() => { if (options.coalesce) pendingHeldRef.current.delete(name); });
+    return task;
   }, [mutate]);
 
   useEffect(() => {
@@ -186,12 +242,12 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
       const target = event.target as HTMLElement | null;
       if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
       const held = keyActions[event.code];
-      if (held) { event.preventDefault(); if (!heldActions.has(held)) sendAction(held, .3); heldActions.add(held); }
-      else if (!event.repeat && (event.code === "KeyE" || event.code === "KeyQ")) sendAction(event.code === "KeyE" ? "dash" : "skill");
+      if (held) { event.preventDefault(); if (!heldActions.has(held)) void sendAction(held, .3, { coalesce: true }); heldActions.add(held); }
+      else if (!event.repeat && (event.code === "KeyE" || event.code === "KeyQ")) void sendAction(event.code === "KeyE" ? "dash" : "skill");
     };
     const up = (event: KeyboardEvent) => { const held = keyActions[event.code]; if (held) heldActions.delete(held); };
     window.addEventListener("keydown", down); window.addEventListener("keyup", up);
-    const repeat = window.setInterval(() => heldActions.forEach((action) => sendAction(action, .3)), Math.max(100, room.actionIntervalMs));
+    const repeat = window.setInterval(() => heldActions.forEach((action) => void sendAction(action, .3, { coalesce: true })), Math.max(100, room.actionIntervalMs));
     return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); window.clearInterval(repeat); heldActions.clear(); };
   }, [room?.actionIntervalMs, room?.controlMode, sendAction]);
 
@@ -226,27 +282,62 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
       await fetch("/api/rooms", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "leave", roomId }) });
     } finally { onExit(); }
   };
-  const submitCommand = (event: FormEvent) => {
+  const submitCommand = async (event: FormEvent) => {
     event.preventDefault();
     const value = command.trim().toLowerCase();
+    if (!value) return;
+    if (value === "help") {
+      setCommandLog([
+        "> help",
+        "forward(seconds) · move for 0.1–3 seconds",
+        "turnleft(seconds) · rotate left for 0.1–3 seconds",
+        "turnright(seconds) · rotate right for 0.1–3 seconds",
+        "dash() · burst forward when cooldown is ready",
+        "skill() · activate the equipped skill",
+        "clear · clear this command log",
+      ]);
+      setCommand("");
+      return;
+    }
+    if (value === "clear") {
+      setCommandLog([]);
+      setCommand("");
+      return;
+    }
     const timed = value.match(/^(forward|turnleft|turnright)\((\d+(?:\.\d+)?)\)$/);
     const instant = value.match(/^(dash|skill)\(\)$/);
-    if (timed) sendAction(timed[1] as OnlineActionName, Number(timed[2]));
-    else if (instant) sendAction(instant[1] as OnlineActionName);
-    else setMessage("Use forward(x), turnleft(x), turnright(x), dash(), or skill().");
+    let result: OnlineActionResult | null = null;
+    if (timed) {
+      const duration = Number(timed[2]);
+      if (duration < GAME_RULES.actionDuration.minimum || duration > GAME_RULES.actionDuration.maximum) {
+        setCommandLog((items) => [...items.slice(-6), `> ${value}`, "Rejected · duration must be between 0.1 and 3 seconds"]);
+        setCommand("");
+        return;
+      }
+      result = await sendAction(timed[1] as OnlineActionName, duration);
+    } else if (instant) result = await sendAction(instant[1] as OnlineActionName);
+    else {
+      setCommandLog((items) => [...items.slice(-6), `> ${value}`, "Unknown command · type help to list commands"]);
+      setCommand("");
+      return;
+    }
+    setCommandLog((items) => [...items.slice(-6), `> ${value}`, result ? actionFeedback(result) : "Command could not be sent"]);
     setCommand("");
   };
 
   const startHeldAction = useCallback((action: OnlineActionName, event: ReactPointerEvent<HTMLButtonElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
     heldRef.current.add(action);
-    sendAction(action, .3);
+    void sendAction(action, .3, { coalesce: true });
   }, [sendAction]);
   const stopHeldAction = useCallback((action: OnlineActionName) => { heldRef.current.delete(action); }, []);
   const setupRemaining = room ? Math.max(0, Math.ceil((((room.currentSide === "host" ? room.host : room.guest)?.setupDeadline ?? clock) - clock) / 1000)) : 0;
   const countdown = room?.countdownEndsAt ? Math.max(0, Math.ceil((room.countdownEndsAt - clock) / 1000)) : 0;
   const match = room?.match;
   const ownSide: RoomSide = room?.currentSide ?? "host";
+  const ownPlayer = room ? (ownSide === "host" ? room.host : room.guest) : null;
+  const ownReady = Boolean(ownPlayer?.ready);
+  const ownScriptError = match?.bots[ownSide].scriptError;
   const remaining = match ? Math.max(0, room!.roundSeconds * 1000 - (match.simulatedAt - match.roundStartedAt)) : 0;
   const botStyle = (side: RoomSide) => {
     const bot = match?.bots[side];
@@ -260,7 +351,7 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
       <div className="lobby-versus">
         {[room.host, room.guest].map((player) => player ? <article key={player.id} className={player.id === (ownSide === "host" ? room.host.id : room.guest?.id) ? "you" : ""}><BotVisual name={player.bot.name} skill={player.bot.skill} appearance={player.bot.appearance} /><strong>{player.displayName}</strong><span>{player.bot.name} · {player.ready ? "READY" : "SETTING UP"}</span></article> : <article key="empty" className="empty"><strong>Waiting for player two</strong><span>Share room ID {room.id}</span></article>)}
       </div>
-      {room.status === "waiting" && room.guest && <div className="lobby-ready-panel"><label>Battle bot<select value={botId} onChange={(event) => void configure(event.target.value)}>{bots.map((bot) => <option value={bot.id} key={bot.id}>{bot.name} · {bot.skill}</option>)}</select></label><span>Auto-ready in {setupRemaining}s</span><button type="button" onClick={() => void mutate("ready")}>Ready now</button></div>}
+      {room.status === "waiting" && room.guest && <div className={`lobby-ready-panel ${ownReady ? "ready" : ""}`}><label>Battle bot<select value={botId} disabled={ownReady} onChange={(event) => void configure(event.target.value)}>{bots.map((bot) => <option value={bot.id} key={bot.id}>{bot.name} · {bot.skill}</option>)}</select></label><span>{ownReady ? "Waiting for opponent" : `Auto-ready in ${setupRemaining}s`}</span><button type="button" disabled={ownReady} aria-pressed={ownReady} onClick={() => void mutate("ready")}>{ownReady ? "Ready ✓" : "Ready now"}</button></div>}
       {message && <p className="room-message">{message}</p>}
     </section>
   );
@@ -284,12 +375,13 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
       </div>
       {room.status === "completed" ? <div className="online-result"><span>{room.completionReason === "disconnect" ? "Opponent disconnected" : "Match complete"}</span><strong>{room.result?.toUpperCase()}</strong><p>Rewards and leaderboard points were applied online.</p><button type="button" onClick={onExit}>Return to rooms</button></div> : (
         <div className="online-controls">
-          {room.controlMode === "buttons" && <div className="action-pad"><button type="button" onPointerDown={(event) => startHeldAction("turnleft", event)} onPointerUp={() => stopHeldAction("turnleft")} onPointerCancel={() => stopHeldAction("turnleft")}>Turn left</button><button type="button" onPointerDown={(event) => startHeldAction("forward", event)} onPointerUp={() => stopHeldAction("forward")} onPointerCancel={() => stopHeldAction("forward")}>Forward</button><button type="button" onPointerDown={(event) => startHeldAction("turnright", event)} onPointerUp={() => stopHeldAction("turnright")} onPointerCancel={() => stopHeldAction("turnright")}>Turn right</button><button type="button" onClick={() => sendAction("dash")}>Dash</button><button type="button" onClick={() => sendAction("skill")}>Skill</button></div>}
-          {room.controlMode === "live" && <form className="online-command" onSubmit={submitCommand}><input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="forward(0.3)" aria-label="Live battle command" /><button type="submit">Send command</button></form>}
-          {room.controlMode === "script" && <p>Both scripts are executing on the authoritative match server.</p>}
+          {room.controlMode === "buttons" && <div className="action-pad"><button type="button" onPointerDown={(event) => startHeldAction("turnleft", event)} onPointerUp={() => stopHeldAction("turnleft")} onPointerCancel={() => stopHeldAction("turnleft")} onLostPointerCapture={() => stopHeldAction("turnleft")}>Turn left</button><button type="button" onPointerDown={(event) => startHeldAction("forward", event)} onPointerUp={() => stopHeldAction("forward")} onPointerCancel={() => stopHeldAction("forward")} onLostPointerCapture={() => stopHeldAction("forward")}>Forward</button><button type="button" onPointerDown={(event) => startHeldAction("turnright", event)} onPointerUp={() => stopHeldAction("turnright")} onPointerCancel={() => stopHeldAction("turnright")} onLostPointerCapture={() => stopHeldAction("turnright")}>Turn right</button><button type="button" onClick={() => void sendAction("dash")}>Dash</button><button type="button" onClick={() => void sendAction("skill")}>Skill</button></div>}
+          {room.controlMode === "live" && <div className="online-command-shell"><div className="online-command-log" aria-live="polite">{commandLog.map((line, index) => <span key={`${index}-${line}`}>{line}</span>)}</div><form className="online-command" onSubmit={(event) => void submitCommand(event)}><input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="Type help or forward(0.3)" aria-label="Live battle command" autoComplete="off" /><button type="submit">Send command</button></form></div>}
+          {room.controlMode === "script" && <div className={`online-script-status ${ownScriptError ? "error" : ""}`}><strong>{ownScriptError ? "Your script paused" : "Scripts running"}</strong><span>{ownScriptError ?? "Both scripts are executing on the authoritative match server."}</span></div>}
           <button type="button" className="leave-online" onClick={leave}>Forfeit</button>
         </div>
       )}
+      {room.status !== "completed" && lastActionFeedback && <p className="online-action-feedback" aria-live="polite">{lastActionFeedback}</p>}
       {message && <p className="online-error">{message}</p>}
     </section>
   );

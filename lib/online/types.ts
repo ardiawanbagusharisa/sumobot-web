@@ -4,6 +4,22 @@ import type { ScriptRuntimeSnapshot } from "@/lib/game/script-runtime";
 export type RoomStatus = "waiting" | "countdown" | "live" | "completed";
 export type RoomSide = "host" | "guest";
 export type OnlineActionName = "forward" | "turnleft" | "turnright" | "dash" | "skill";
+export type OnlineActionRejectionReason = "interval" | "stunned" | "stone_locked" | "dash_cooldown" | "skill_cooldown" | "queue_full";
+
+export interface OnlineActionResult {
+  name: OnlineActionName;
+  accepted: boolean;
+  queued: boolean;
+  reason: OnlineActionRejectionReason | null;
+  sequence: number | null;
+  executeAt: number | null;
+}
+
+export interface QueuedOnlineAction {
+  name: "forward" | "turnleft" | "turnright";
+  duration: number;
+  executeAt: number;
+}
 
 export interface OnlineBotSelection {
   id: string;
@@ -58,7 +74,9 @@ export interface OnlineBotState extends OnlineBotSelection {
   spinVelocity: number;
   lastActionAt: number;
   nextDecisionAt: number;
+  pendingActions: QueuedOnlineAction[];
   scriptSnapshot: ScriptRuntimeSnapshot;
+  scriptError: string | null;
   telemetry: OnlineTelemetry;
   speedTotal: number;
   speedSamples: number;

@@ -4,8 +4,8 @@ import { ensureProfileSchema, getOnlineProfile } from "@/lib/profile/server";
 import { ensureMatchSchema } from "@/lib/matches/server";
 import { MATCH_OUTCOME_RULES, type ControlMode, type MatchResult } from "@/lib/game/rules";
 import { parseBotScript } from "@/lib/game/script-runtime";
-import { advanceOnlineMatch, createOnlineMatch, forfeitOnlineMatch, ONLINE_ARENA, performOnlineAction } from "@/lib/online/simulation";
-import type { OnlineActionName, OnlineBotSelection, OnlineMatchState, OnlineRoomPlayer, OnlineRoomSummary, OnlineRoomView, RoomSide, RoomStatus } from "@/lib/online/types";
+import { advanceOnlineMatch, createOnlineMatch, forfeitOnlineMatch, ONLINE_ARENA, performOnlineActionDetailed } from "@/lib/online/simulation";
+import type { OnlineActionName, OnlineActionResult, OnlineBotSelection, OnlineMatchState, OnlineRoomPlayer, OnlineRoomSummary, OnlineRoomView, RoomSide, RoomStatus } from "@/lib/online/types";
 
 interface RoomRow {
   id: string;
@@ -119,13 +119,16 @@ function viewRoom(row: RoomRow, playerId: string): OnlineRoomView {
   if (!side) throw new Error("You are not a player in this room.");
   const winnerSide = row.winnerPlayerId ? (row.winnerPlayerId === row.hostPlayerId ? "host" : "guest") : null;
   const result: MatchResult | null = row.status !== "completed" ? null : !winnerSide ? "draw" : winnerSide === side ? "win" : "loss";
+  const match = parseMatch(row.matchState);
   return {
     ...summarize(row),
     currentSide: side,
     host: parsePlayer(row.hostPlayer)!,
     guest: parsePlayer(row.guestPlayer),
     countdownEndsAt: row.countdownStartedAt ? row.countdownStartedAt + 5000 : null,
-    match: parseMatch(row.matchState),
+    // Live replay frames remain authoritative on the server; omitting them from
+    // frequent room snapshots keeps the realtime response bounded.
+    match: match ? { ...match, replay: [] } : null,
     winnerPlayerId: row.winnerPlayerId,
     result,
     completionReason: row.completionReason,
@@ -239,28 +242,30 @@ export async function createOnlineRoom(user: AuthUser, input: { isPrivate: boole
 
 export async function joinOnlineRoom(user: AuthUser, roomId: string, accessCode: string | undefined, botValue: unknown) {
   await ensureOnlineRoomSchema();
-  const row = await loadRoom(roomId);
-  if (!row) return { error: "Room not found.", status: 404 as const };
-  if (roomSide(row, user.id)) return { room: await synchronizeOnlineRoom(user, row.id) };
-  if (row.status !== "waiting" || row.guestPlayerId) return { error: "This room is no longer available.", status: 409 as const };
-  if (row.isPrivate && (!accessCode || await sha256(accessCode) !== row.accessCodeHash)) return { error: "Incorrect private room code.", status: 403 as const };
-  const bot = validateBot(botValue, row.controlMode);
-  if (!bot) return { error: "Select a valid bot and script before joining.", status: 400 as const };
-  const nowMs = Date.now();
-  const deadline = nowMs + 30_000;
-  const host = parsePlayer(row.hostPlayer)!;
-  host.setupDeadline = deadline;
-  host.ready = false;
-  const guest = makePlayer(user, bot, deadline);
-  const now = new Date(nowMs).toISOString();
-  const d1 = await getDatabase();
-  const result = await d1.prepare(`UPDATE online_rooms SET
-      guest_player_id = ?, guest_player = ?, host_player = ?, host_ready = 0, guest_ready = 0,
-      host_setup_deadline = ?, guest_setup_deadline = ?, last_guest_seen_at = ?, updated_at = ?, version = version + 1
-    WHERE id = ? AND guest_player_id IS NULL AND status = 'waiting' AND version = ?`)
-    .bind(user.id, JSON.stringify(guest), JSON.stringify(host), deadline, deadline, nowMs, now, row.id, row.version).run();
-  if (!resultChanges(result)) return { error: "Another player joined first.", status: 409 as const };
-  return { room: await synchronizeOnlineRoom(user, row.id) };
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const row = await loadRoom(roomId);
+    if (!row) return { error: "Room not found.", status: 404 as const };
+    if (roomSide(row, user.id)) return { room: await synchronizeOnlineRoom(user, row.id) };
+    if (row.status !== "waiting" || row.guestPlayerId) return { error: "This room is no longer available.", status: 409 as const };
+    if (row.isPrivate && (!accessCode || await sha256(accessCode) !== row.accessCodeHash)) return { error: "Incorrect private room code.", status: 403 as const };
+    const bot = validateBot(botValue, row.controlMode);
+    if (!bot) return { error: "Select a valid bot and script before joining.", status: 400 as const };
+    const nowMs = Date.now();
+    const deadline = nowMs + 30_000;
+    const host = parsePlayer(row.hostPlayer)!;
+    host.setupDeadline = deadline;
+    host.ready = false;
+    const guest = makePlayer(user, bot, deadline);
+    const now = new Date(nowMs).toISOString();
+    const d1 = await getDatabase();
+    const result = await d1.prepare(`UPDATE online_rooms SET
+        guest_player_id = ?, guest_player = ?, host_player = ?, host_ready = 0, guest_ready = 0,
+        host_setup_deadline = ?, guest_setup_deadline = ?, last_guest_seen_at = ?, updated_at = ?, version = version + 1
+      WHERE id = ? AND guest_player_id IS NULL AND status = 'waiting' AND version = ?`)
+      .bind(user.id, JSON.stringify(guest), JSON.stringify(host), deadline, deadline, nowMs, now, row.id, row.version).run();
+    if (resultChanges(result)) return { room: await synchronizeOnlineRoom(user, row.id) };
+  }
+  return { error: "The room changed while joining. Please try once more.", status: 409 as const };
 }
 
 function updatePlayerJson(row: RoomRow, side: RoomSide, player: OnlineRoomPlayer) {
@@ -338,7 +343,7 @@ export async function synchronizeOnlineRoom(user: AuthUser, roomId: string) {
   throw new Error("The room changed too quickly; retry.");
 }
 
-export async function updateOnlineRoom(user: AuthUser, roomId: string, action: string, payload: { bot?: unknown; name?: unknown; duration?: unknown }) {
+export async function updateOnlineRoom(user: AuthUser, roomId: string, action: string, payload: { bot?: unknown; name?: unknown; duration?: unknown; sequence?: unknown }) {
   await ensureOnlineRoomSchema();
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const row = await loadRoom(roomId);
@@ -348,6 +353,7 @@ export async function updateOnlineRoom(user: AuthUser, roomId: string, action: s
     const expected = row.version;
     const nowMs = Date.now();
     synchronizeState(row, side, nowMs);
+    let actionResult: OnlineActionResult | undefined;
     if (action === "ready") {
       if (row.status !== "waiting" || !row.guestPlayerId) return { error: "Both players must be present before readying.", status: 409 as const };
       const player = parsePlayer(side === "host" ? row.hostPlayer : row.guestPlayer)!;
@@ -367,7 +373,15 @@ export async function updateOnlineRoom(user: AuthUser, roomId: string, action: s
       const name = payload.name;
       if (typeof name !== "string" || !["forward", "turnleft", "turnright", "dash", "skill"].includes(name)) return { error: "Unknown action.", status: 400 as const };
       const match = parseMatch(row.matchState)!;
-      performOnlineAction(match, side, name as OnlineActionName, typeof payload.duration === "number" ? payload.duration : undefined, row.actionIntervalMs);
+      const sequence = typeof payload.sequence === "number" && Number.isFinite(payload.sequence) ? Math.round(payload.sequence) : null;
+      actionResult = performOnlineActionDetailed(
+        match,
+        side,
+        name as OnlineActionName,
+        typeof payload.duration === "number" ? payload.duration : undefined,
+        row.actionIntervalMs,
+        { queueIfThrottled: true, sequence },
+      );
       row.matchState = JSON.stringify(match);
     } else if (action === "leave") {
       if (row.status === "live" || row.status === "countdown") {
@@ -391,7 +405,7 @@ export async function updateOnlineRoom(user: AuthUser, roomId: string, action: s
     if (await saveRoom(row, expected)) {
       if (row.status === "completed" && row.guestPlayerId) await finalizeOnlineRoom(row);
       if (action === "leave") return { left: true as const };
-      return { room: viewRoom(row, user.id) };
+      return { room: viewRoom(row, user.id), actionResult };
     }
   }
   return { error: "The room changed; try again.", status: 409 as const };

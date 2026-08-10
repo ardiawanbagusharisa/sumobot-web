@@ -2,6 +2,8 @@ import { GAME_RULES, clampActionDuration } from "@/lib/game/rules";
 import { createScriptRuntime } from "@/lib/game/script-runtime";
 import type {
   OnlineActionName,
+  OnlineActionRejectionReason,
+  OnlineActionResult,
   OnlineBotSelection,
   OnlineBotState,
   OnlineMatchState,
@@ -51,7 +53,9 @@ function createBot(side: RoomSide, playerId: string, selection: OnlineBotSelecti
     spinVelocity: 0,
     lastActionAt: 0,
     nextDecisionAt: 0,
+    pendingActions: [],
     scriptSnapshot: {},
+    scriptError: null,
     telemetry: emptyTelemetry(),
     speedTotal: 0,
     speedSamples: 0,
@@ -75,6 +79,8 @@ function resetBot(bot: OnlineBotState, side: RoomSide, now: number) {
   bot.spinVelocity = 0;
   bot.lastActionAt = 0;
   bot.nextDecisionAt = now;
+  bot.pendingActions = [];
+  bot.scriptError = null;
   bot.previousX = bot.x;
   bot.previousY = bot.y;
 }
@@ -116,19 +122,35 @@ function normalizeAngle(angle: number) {
   return angle;
 }
 
-export function performOnlineAction(
+export function performOnlineActionDetailed(
   state: OnlineMatchState,
   side: RoomSide,
   action: OnlineActionName,
   duration: number | undefined,
   actionIntervalMs: number,
-) {
-  if (state.phase !== "live") return false;
+  options: { queueIfThrottled?: boolean; sequence?: number | null } = {},
+): OnlineActionResult {
+  const rejected = (reason: OnlineActionRejectionReason): OnlineActionResult => ({
+    name: action, accepted: false, queued: false, reason, sequence: options.sequence ?? null, executeAt: null,
+  });
+  const accepted = (queued = false, executeAt: number | null = null): OnlineActionResult => ({
+    name: action, accepted: true, queued, reason: null, sequence: options.sequence ?? null, executeAt,
+  });
+  if (state.phase !== "live") return rejected("interval");
   const now = state.simulatedAt;
   const bot = state.bots[side];
+  bot.pendingActions ??= [];
   const timed = action === "forward" || action === "turnleft" || action === "turnright";
-  if (timed && now - bot.lastActionAt < actionIntervalMs) return false;
-  if (now < bot.stunnedUntil || (bot.skill === "stone" && now < bot.skillUntil)) return false;
+  if (timed && now - bot.lastActionAt < actionIntervalMs) {
+    if (!options.queueIfThrottled) return rejected("interval");
+    if (bot.pendingActions.length >= 8) return rejected("queue_full");
+    const previousExecuteAt = bot.pendingActions.at(-1)?.executeAt ?? bot.lastActionAt;
+    const executeAt = Math.max(now, previousExecuteAt + actionIntervalMs);
+    bot.pendingActions.push({ name: action, duration: clampActionDuration(duration ?? 0.2), executeAt });
+    return accepted(true, executeAt);
+  }
+  if (now < bot.stunnedUntil) return rejected("stunned");
+  if (bot.skill === "stone" && now < bot.skillUntil) return rejected("stone_locked");
   const safeDuration = clampActionDuration(duration ?? 0.2) * 1000;
 
   if (action === "forward") bot.thrustUntil = Math.max(bot.thrustUntil, now + safeDuration);
@@ -136,13 +158,13 @@ export function performOnlineAction(
     bot.turnDirection = action === "turnleft" ? -1 : 1;
     bot.turnUntil = now + safeDuration;
   } else if (action === "dash") {
-    if (now < bot.dashReadyAt) return false;
+    if (now < bot.dashReadyAt) return rejected("dash_cooldown");
     const boost = bot.skill === "boost" && now < bot.skillUntil ? GAME_RULES.skills.boostMultiplier : 1;
     bot.vx += Math.cos(bot.angle) * GAME_RULES.dash.force * boost;
     bot.vy += Math.sin(bot.angle) * GAME_RULES.dash.force * boost;
     bot.dashReadyAt = now + GAME_RULES.dash.cooldownSeconds * 1000;
   } else if (action === "skill") {
-    if (now < bot.skillReadyAt) return false;
+    if (now < bot.skillReadyAt) return rejected("skill_cooldown");
     bot.skillUntil = now + GAME_RULES.skills.durationSeconds * 1000;
     bot.skillReadyAt = now + GAME_RULES.skills.cooldownSeconds * 1000;
     if (bot.skill === "stone") { bot.vx = 0; bot.vy = 0; }
@@ -151,16 +173,42 @@ export function performOnlineAction(
   if (timed) bot.lastActionAt = now;
   bot.telemetry.actionCounts[action] += 1;
   if (bot.telemetry.firstActions.length < 8) bot.telemetry.firstActions.push(action);
-  return true;
+  return accepted();
 }
 
-function scriptDecision(state: OnlineMatchState, side: RoomSide, actionIntervalMs: number) {
+export function performOnlineAction(
+  state: OnlineMatchState,
+  side: RoomSide,
+  action: OnlineActionName,
+  duration: number | undefined,
+  actionIntervalMs: number,
+) {
+  return performOnlineActionDetailed(state, side, action, duration, actionIntervalMs).accepted;
+}
+
+type OnlineScriptRuntime = ReturnType<typeof createScriptRuntime>;
+
+function prepareScriptRuntime(bot: OnlineBotState): OnlineScriptRuntime | null {
+  try {
+    const runtime = createScriptRuntime(bot.scriptSource);
+    runtime.restore(bot.scriptSnapshot);
+    bot.scriptError = null;
+    return runtime;
+  } catch (error) {
+    bot.scriptError = error instanceof Error ? error.message : "Script runtime error";
+    return null;
+  }
+}
+
+function scriptDecision(state: OnlineMatchState, side: RoomSide, actionIntervalMs: number, runtime: OnlineScriptRuntime | null) {
   const bot = state.bots[side];
   if (state.simulatedAt < bot.nextDecisionAt) return;
   const other = state.bots[side === "host" ? "guest" : "host"];
   try {
-    const runtime = createScriptRuntime(bot.scriptSource);
-    runtime.restore(bot.scriptSnapshot);
+    if (!runtime) {
+      bot.nextDecisionAt = state.simulatedAt + actionIntervalMs;
+      return;
+    }
     const action = runtime.decide({ game: {
       elapsed: Math.max(0, (state.simulatedAt - state.startedAt) / 1000),
       arena: { radius: ONLINE_ARENA.radius },
@@ -179,11 +227,21 @@ function scriptDecision(state: OnlineMatchState, side: RoomSide, actionIntervalM
       },
     } });
     bot.scriptSnapshot = runtime.snapshot();
+    bot.scriptError = null;
     if (action) performOnlineAction(state, side, action.name, action.duration, actionIntervalMs);
-  } catch {
-    // Invalid scripts simply skip their decision; validation also occurs before room readiness.
+  } catch (error) {
+    bot.scriptError = error instanceof Error ? error.message : "Script runtime error";
   }
   bot.nextDecisionAt = state.simulatedAt + actionIntervalMs;
+}
+
+function drainQueuedActions(state: OnlineMatchState, side: RoomSide, actionIntervalMs: number) {
+  const bot = state.bots[side];
+  bot.pendingActions ??= [];
+  const next = bot.pendingActions[0];
+  if (!next || state.simulatedAt < next.executeAt) return;
+  bot.pendingActions.shift();
+  performOnlineActionDetailed(state, side, next.name, next.duration, actionIntervalMs);
 }
 
 function updateBot(bot: OnlineBotState, dt: number, now: number) {
@@ -296,6 +354,10 @@ function finishRound(state: OnlineMatchState, winner: RoomSide | "draw", reason:
 
 export function advanceOnlineMatch(state: OnlineMatchState, targetNow: number, controlMode: string, roundSeconds: number, actionIntervalMs: number) {
   const cappedTarget = Math.min(targetNow, state.simulatedAt + MAX_ADVANCE_MS);
+  const scriptRuntimes = controlMode === "script" ? {
+    host: prepareScriptRuntime(state.bots.host),
+    guest: prepareScriptRuntime(state.bots.guest),
+  } : null;
   while (state.simulatedAt < cappedTarget && state.phase !== "complete") {
     state.simulatedAt = Math.min(cappedTarget, state.simulatedAt + STEP_MS);
     if (state.phase === "round-break") {
@@ -309,9 +371,11 @@ export function advanceOnlineMatch(state: OnlineMatchState, targetNow: number, c
       }
       continue;
     }
+    drainQueuedActions(state, "host", actionIntervalMs);
+    drainQueuedActions(state, "guest", actionIntervalMs);
     if (controlMode === "script") {
-      scriptDecision(state, "host", actionIntervalMs);
-      scriptDecision(state, "guest", actionIntervalMs);
+      scriptDecision(state, "host", actionIntervalMs, scriptRuntimes?.host ?? null);
+      scriptDecision(state, "guest", actionIntervalMs, scriptRuntimes?.guest ?? null);
     }
     updateBot(state.bots.host, STEP_MS / 1000, state.simulatedAt);
     updateBot(state.bots.guest, STEP_MS / 1000, state.simulatedAt);

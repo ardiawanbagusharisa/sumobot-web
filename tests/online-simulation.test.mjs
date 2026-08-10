@@ -35,6 +35,35 @@ test("authoritative simulation accepts actions and records replay frames", () =>
   assert.ok(state.bots.host.telemetry.actionCounts.forward >= 1);
 });
 
+test("rapid timed inputs are queued and acknowledged in order", () => {
+  const startedAt = 15_000;
+  const state = simulation.createOnlineMatch(startedAt, { playerId: "p1", bot: bot("Rivet") }, { playerId: "p2", bot: bot("Relay") });
+  const first = simulation.performOnlineActionDetailed(state, "host", "forward", .3, 200, { queueIfThrottled: true, sequence: 1 });
+  const second = simulation.performOnlineActionDetailed(state, "host", "turnright", .2, 200, { queueIfThrottled: true, sequence: 2 });
+
+  assert.deepEqual({ accepted: first.accepted, queued: first.queued, sequence: first.sequence }, { accepted: true, queued: false, sequence: 1 });
+  assert.deepEqual({ accepted: second.accepted, queued: second.queued, sequence: second.sequence }, { accepted: true, queued: true, sequence: 2 });
+  assert.equal(state.bots.host.pendingActions.length, 1);
+
+  simulation.advanceOnlineMatch(state, startedAt + 450, "buttons", 60, 200);
+  assert.equal(state.bots.host.pendingActions.length, 0);
+  assert.equal(state.bots.host.telemetry.actionCounts.turnright, 1);
+});
+
+test("script mode executes steering decisions and reports runtime errors", () => {
+  const startedAt = 17_000;
+  const state = simulation.createOnlineMatch(startedAt, { playerId: "p1", bot: bot("Rivet") }, { playerId: "p2", bot: bot("Relay") });
+  state.bots.guest.y += 100;
+  simulation.advanceOnlineMatch(state, startedAt + 350, "script", 60, 100);
+  assert.ok(state.bots.host.telemetry.actionCounts.turnright > 0);
+  assert.equal(state.bots.host.scriptError, null);
+
+  state.bots.host.scriptSource = "function decide(game) { return missing(); }";
+  state.bots.host.nextDecisionAt = state.simulatedAt;
+  simulation.advanceOnlineMatch(state, state.simulatedAt + 150, "script", 60, 100);
+  assert.match(state.bots.host.scriptError ?? "", /Unknown function/);
+});
+
 test("arena exit advances the best-of-three score", () => {
   const startedAt = 20_000;
   const state = simulation.createOnlineMatch(startedAt, { playerId: "p1", bot: bot("Rivet") }, { playerId: "p2", bot: bot("Relay") });

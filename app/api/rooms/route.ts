@@ -20,7 +20,7 @@ export async function POST(request: Request) {
   const body = await request.json() as {
     action?: string; roomId?: string; accessCode?: string; isPrivate?: boolean;
     controlMode?: ControlMode; roundSeconds?: number; actionIntervalMs?: number;
-    bot?: unknown; name?: unknown; duration?: unknown;
+    bot?: unknown; name?: unknown; duration?: unknown; sequence?: unknown;
   };
   try {
     if (body.action === "create" && body.controlMode && ["buttons", "live", "script"].includes(body.controlMode)) {
@@ -37,7 +37,7 @@ export async function POST(request: Request) {
       return NextResponse.json(result);
     }
     if (body.roomId && body.action) {
-      const result = await updateOnlineRoom(user, body.roomId, body.action, { bot: body.bot, name: body.name, duration: body.duration });
+      const result = await updateOnlineRoom(user, body.roomId, body.action, { bot: body.bot, name: body.name, duration: body.duration, sequence: body.sequence });
       if ("error" in result) return NextResponse.json({ error: result.error }, { status: result.status });
       return NextResponse.json(result);
     }
