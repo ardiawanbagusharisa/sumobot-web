@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth/server";
-import { createOnlineRoom, joinOnlineRoom, listOnlineRooms, synchronizeOnlineRoom, updateOnlineRoom } from "@/lib/online/server";
+import { createOnlineRoom, createRealtimeConnection, joinOnlineRoom, listOnlineRooms, synchronizeOnlineRoom, updateOnlineRoom } from "@/lib/online/server";
 import type { ControlMode } from "@/lib/game/rules";
 
 export async function GET(request: Request) {
@@ -33,6 +33,11 @@ export async function POST(request: Request) {
     }
     if (body.action === "join" && body.roomId) {
       const result = await joinOnlineRoom(user, body.roomId, body.accessCode, body.bot);
+      if ("error" in result) return NextResponse.json({ error: result.error }, { status: result.status });
+      return NextResponse.json(result);
+    }
+    if (body.action === "realtime_ticket" && body.roomId) {
+      const result = await createRealtimeConnection(user, body.roomId);
       if ("error" in result) return NextResponse.json({ error: result.error }, { status: result.status });
       return NextResponse.json(result);
     }

@@ -227,6 +227,7 @@ export const onlineRooms = sqliteTable("online_rooms", {
   hostSetupDeadline: integer("host_setup_deadline"),
   guestSetupDeadline: integer("guest_setup_deadline"),
   countdownStartedAt: integer("countdown_started_at"),
+  realtimeStartedAt: integer("realtime_started_at"),
   matchState: text("match_state", { mode: "json" }).$type<Record<string, unknown>>(),
   winnerPlayerId: text("winner_player_id").references(() => players.id),
   completionReason: text("completion_reason", { enum: ["arena_exit", "draw_timeout", "disconnect"] }),

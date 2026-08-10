@@ -5,6 +5,8 @@ import { ensureMatchSchema } from "@/lib/matches/server";
 import { MATCH_OUTCOME_RULES, type ControlMode, type MatchResult } from "@/lib/game/rules";
 import { parseBotScript } from "@/lib/game/script-runtime";
 import { advanceOnlineMatch, createOnlineMatch, forfeitOnlineMatch, ONLINE_ARENA, performOnlineActionDetailed } from "@/lib/online/simulation";
+import { hashRealtimePayload, signRealtimeTicket, verifyCompletionProof } from "@/lib/online/realtime-auth";
+import { REALTIME_PROTOCOL_VERSION, type OnlineRoomBootstrap, type RealtimeCompletionProof, type RealtimeConnectionTicket } from "@/lib/online/realtime-protocol";
 import type { OnlineActionName, OnlineActionResult, OnlineBotSelection, OnlineMatchState, OnlineRoomPlayer, OnlineRoomSummary, OnlineRoomView, RoomSide, RoomStatus } from "@/lib/online/types";
 
 interface RoomRow {
@@ -24,6 +26,7 @@ interface RoomRow {
   hostSetupDeadline: number | null;
   guestSetupDeadline: number | null;
   countdownStartedAt: number | null;
+  realtimeStartedAt: number | null;
   matchState: string | null;
   winnerPlayerId: string | null;
   completionReason: "arena_exit" | "draw_timeout" | "disconnect" | null;
@@ -61,6 +64,7 @@ export async function ensureOnlineRoomSchema() {
       host_setup_deadline INTEGER,
       guest_setup_deadline INTEGER,
       countdown_started_at INTEGER,
+      realtime_started_at INTEGER,
       match_state TEXT,
       winner_player_id TEXT REFERENCES players(id),
       completion_reason TEXT,
@@ -178,7 +182,7 @@ async function loadRoom(id: string) {
     host_player AS hostPlayer, guest_player AS guestPlayer,
     host_ready AS hostReady, guest_ready AS guestReady,
     host_setup_deadline AS hostSetupDeadline, guest_setup_deadline AS guestSetupDeadline,
-    countdown_started_at AS countdownStartedAt, match_state AS matchState,
+    countdown_started_at AS countdownStartedAt, realtime_started_at AS realtimeStartedAt, match_state AS matchState,
     winner_player_id AS winnerPlayerId, completion_reason AS completionReason,
     last_host_seen_at AS lastHostSeenAt, last_guest_seen_at AS lastGuestSeenAt,
     version, created_at AS createdAt, updated_at AS updatedAt, completed_at AS completedAt
@@ -197,7 +201,7 @@ export async function listOnlineRooms(query?: string) {
     host_player AS hostPlayer, guest_player AS guestPlayer,
     host_ready AS hostReady, guest_ready AS guestReady,
     host_setup_deadline AS hostSetupDeadline, guest_setup_deadline AS guestSetupDeadline,
-    countdown_started_at AS countdownStartedAt, match_state AS matchState,
+    countdown_started_at AS countdownStartedAt, realtime_started_at AS realtimeStartedAt, match_state AS matchState,
     winner_player_id AS winnerPlayerId, completion_reason AS completionReason,
     last_host_seen_at AS lastHostSeenAt, last_guest_seen_at AS lastGuestSeenAt,
     version, created_at AS createdAt, updated_at AS updatedAt, completed_at AS completedAt
@@ -277,12 +281,12 @@ async function saveRoom(row: RoomRow, expectedVersion: number) {
   const d1 = await getDatabase();
   const result = await d1.prepare(`UPDATE online_rooms SET
     status = ?, guest_player_id = ?, host_player = ?, guest_player = ?, host_ready = ?, guest_ready = ?,
-    host_setup_deadline = ?, guest_setup_deadline = ?, countdown_started_at = ?, match_state = ?,
+    host_setup_deadline = ?, guest_setup_deadline = ?, countdown_started_at = ?, realtime_started_at = ?, match_state = ?,
     winner_player_id = ?, completion_reason = ?, last_host_seen_at = ?, last_guest_seen_at = ?,
     completed_at = ?, updated_at = ?, version = version + 1
     WHERE id = ? AND version = ?`)
     .bind(row.status, row.guestPlayerId, row.hostPlayer, row.guestPlayer, row.hostReady, row.guestReady,
-      row.hostSetupDeadline, row.guestSetupDeadline, row.countdownStartedAt, row.matchState,
+      row.hostSetupDeadline, row.guestSetupDeadline, row.countdownStartedAt, row.realtimeStartedAt, row.matchState,
       row.winnerPlayerId, row.completionReason, row.lastHostSeenAt, row.lastGuestSeenAt,
       row.completedAt, row.updatedAt, row.id, expectedVersion).run();
   return resultChanges(result) > 0;
@@ -306,7 +310,7 @@ function synchronizeState(row: RoomRow, currentSide: RoomSide, nowMs: number) {
     row.lastGuestSeenAt = nowMs;
     row.matchState = JSON.stringify(createOnlineMatch(nowMs, { playerId: row.hostPlayerId, bot: host.bot }, { playerId: row.guestPlayerId!, bot: guest.bot }));
   }
-  if (row.status === "live" && row.matchState) {
+  if (row.status === "live" && row.matchState && !row.realtimeStartedAt) {
     const match = parseMatch(row.matchState)!;
     const otherSeen = currentSide === "host" ? row.lastGuestSeenAt : row.lastHostSeenAt;
     if (otherSeen && nowMs - otherSeen > 6000) {
@@ -361,6 +365,9 @@ export async function updateOnlineRoom(user: AuthUser, roomId: string, action: s
       updatePlayerJson(row, side, player);
       if (side === "host") row.hostReady = 1; else row.guestReady = 1;
       if (row.hostReady && row.guestReady) { row.status = "countdown"; row.countdownStartedAt = nowMs; }
+    } else if (action === "realtime_started") {
+      if (row.status !== "live" || !row.matchState) return { error: "The realtime match is not ready.", status: 409 as const };
+      row.realtimeStartedAt ??= nowMs;
     } else if (action === "configure") {
       if (row.status !== "waiting") return { error: "Bot setup is locked after the countdown begins.", status: 409 as const };
       const bot = validateBot(payload.bot, row.controlMode);
@@ -409,6 +416,74 @@ export async function updateOnlineRoom(user: AuthUser, roomId: string, action: s
     }
   }
   return { error: "The room changed; try again.", status: 409 as const };
+}
+
+async function realtimeSettings() {
+  const runtime = await import("cloudflare:workers");
+  const env = runtime.env as unknown as { REALTIME_URL?: string; REALTIME_SHARED_SECRET?: string };
+  const url = env.REALTIME_URL?.trim().replace(/\/$/, "") ?? "";
+  const secret = env.REALTIME_SHARED_SECRET?.trim() ?? "";
+  return { url, secret };
+}
+
+export async function createRealtimeConnection(user: AuthUser, roomId: string) {
+  const { url, secret } = await realtimeSettings();
+  if (!url || !secret) return { error: "Realtime transport is not configured; using compatibility mode.", status: 503 as const };
+  const room = await synchronizeOnlineRoom(user, roomId);
+  if (room.status !== "live" || !room.match || !room.guest) return { error: "The realtime match has not started yet.", status: 409 as const };
+  const bootstrap: OnlineRoomBootstrap = {
+    protocolVersion: REALTIME_PROTOCOL_VERSION,
+    roomId: room.id,
+    controlMode: room.controlMode,
+    roundSeconds: room.roundSeconds,
+    actionIntervalMs: room.actionIntervalMs,
+    host: room.host,
+    guest: room.guest,
+    match: room.match,
+  };
+  const claims = {
+    roomId: room.id,
+    playerId: user.id,
+    side: room.currentSide,
+    bootstrapHash: await hashRealtimePayload(bootstrap),
+    expiresAt: Date.now() + 60_000,
+  };
+  const websocketUrl = `${url.replace(/^http:/, "ws:").replace(/^https:/, "wss:")}/room/${encodeURIComponent(room.id)}`;
+  const ticket: RealtimeConnectionTicket = { websocketUrl, token: await signRealtimeTicket(claims, secret), bootstrap };
+  return { ticket };
+}
+
+export async function completeRealtimeRoom(roomId: string, stateValue: unknown, proof: RealtimeCompletionProof) {
+  const { secret } = await realtimeSettings();
+  if (!secret) return { error: "Realtime completion is not configured.", status: 503 as const };
+  if (!stateValue || typeof stateValue !== "object") return { error: "Invalid match state.", status: 400 as const };
+  const state = stateValue as OnlineMatchState;
+  if (state.schemaVersion !== 1 || state.phase !== "complete" || !state.reason || !["host", "guest", "draw"].includes(String(state.winnerSide))) {
+    return { error: "The authoritative match is not complete.", status: 400 as const };
+  }
+  if (!await verifyCompletionProof(roomId.toUpperCase(), state, proof, secret)) return { error: "Invalid completion proof.", status: 403 as const };
+  await ensureOnlineRoomSchema();
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const row = await loadRoom(roomId);
+    if (!row) return { error: "Room not found.", status: 404 as const };
+    if (row.status === "completed") return { completed: true as const };
+    if (!row.guestPlayerId || state.bots.host.playerId !== row.hostPlayerId || state.bots.guest.playerId !== row.guestPlayerId) {
+      return { error: "Match participants do not match the room.", status: 409 as const };
+    }
+    if (state.replay.length > 2400) return { error: "Replay is too large.", status: 413 as const };
+    const expected = row.version;
+    row.matchState = JSON.stringify(state);
+    row.status = "completed";
+    row.completionReason = state.reason;
+    row.winnerPlayerId = state.winnerSide === "host" ? row.hostPlayerId : state.winnerSide === "guest" ? row.guestPlayerId : null;
+    row.completedAt = new Date(proof.completedAt).toISOString();
+    row.updatedAt = row.completedAt;
+    if (await saveRoom(row, expected)) {
+      await finalizeOnlineRoom(row);
+      return { completed: true as const };
+    }
+  }
+  return { error: "The room changed while completing the match.", status: 409 as const };
 }
 
 function replayFor(row: RoomRow, match: OnlineMatchState | null) {

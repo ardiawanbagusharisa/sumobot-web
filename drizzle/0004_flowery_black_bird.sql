@@ -1,0 +1,1 @@
+ALTER TABLE `online_rooms` ADD `realtime_started_at` integer;

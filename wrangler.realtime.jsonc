@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "sumobot-realtime-alpha",
+  "main": "realtime/worker.ts",
+  "compatibility_date": "2026-08-10",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "RESULTS_URL": "https://sumobot-online-alpha.doodaalee.chatgpt.site/api/rooms/realtime-result"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "MATCHES", "class_name": "MatchRoom" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["MatchRoom"] }
+  ]
+}

@@ -186,6 +186,23 @@ export function performOnlineAction(
   return performOnlineActionDetailed(state, side, action, duration, actionIntervalMs).accepted;
 }
 
+export function applyOnlineControlState(
+  state: OnlineMatchState,
+  side: RoomSide,
+  input: { forward: boolean; turn: -1 | 0 | 1 },
+) {
+  if (state.phase !== "live") return;
+  const bot = state.bots[side];
+  const now = state.simulatedAt;
+  if (now < bot.stunnedUntil || (bot.skill === "stone" && now < bot.skillUntil)) return;
+  const holdUntil = now + 120;
+  if (input.forward) bot.thrustUntil = Math.max(bot.thrustUntil, holdUntil);
+  if (input.turn !== 0) {
+    bot.turnDirection = input.turn;
+    bot.turnUntil = Math.max(bot.turnUntil, holdUntil);
+  }
+}
+
 type OnlineScriptRuntime = ReturnType<typeof createScriptRuntime>;
 
 function prepareScriptRuntime(bot: OnlineBotState): OnlineScriptRuntime | null {
@@ -359,7 +376,9 @@ export function advanceOnlineMatch(state: OnlineMatchState, targetNow: number, c
     guest: prepareScriptRuntime(state.bots.guest),
   } : null;
   while (state.simulatedAt < cappedTarget && state.phase !== "complete") {
+    const previousSimulatedAt = state.simulatedAt;
     state.simulatedAt = Math.min(cappedTarget, state.simulatedAt + STEP_MS);
+    const deltaSeconds = (state.simulatedAt - previousSimulatedAt) / 1000;
     if (state.phase === "round-break") {
       if (state.roundBreakUntil && state.simulatedAt >= state.roundBreakUntil) {
         state.round += 1;
@@ -377,8 +396,8 @@ export function advanceOnlineMatch(state: OnlineMatchState, targetNow: number, c
       scriptDecision(state, "host", actionIntervalMs, scriptRuntimes?.host ?? null);
       scriptDecision(state, "guest", actionIntervalMs, scriptRuntimes?.guest ?? null);
     }
-    updateBot(state.bots.host, STEP_MS / 1000, state.simulatedAt);
-    updateBot(state.bots.guest, STEP_MS / 1000, state.simulatedAt);
+    updateBot(state.bots.host, deltaSeconds, state.simulatedAt);
+    updateBot(state.bots.guest, deltaSeconds, state.simulatedAt);
     resolveCollision(state);
     if (state.simulatedAt >= state.nextTelemetryAt) {
       sampleTelemetry(state);

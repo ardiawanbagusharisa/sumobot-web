@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { BotVisual, type BotAppearance } from "./BotVisual";
+import type { BotAppearance } from "./BotVisual";
 import { BotDiagnosticsPanels, type BotDiagnosticSnapshot } from "./BotDiagnosticsPanels";
+import { BattleViewport } from "./BattleViewport";
 import {
   clampActionDuration,
   GAME_RULES,
@@ -142,11 +143,6 @@ function normalizeAngle(angle: number) {
   while (angle > Math.PI) angle -= Math.PI * 2;
   while (angle < -Math.PI) angle += Math.PI * 2;
   return angle;
-}
-
-function formatTime(seconds: number) {
-  const value = Math.max(0, Math.ceil(seconds));
-  return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
 }
 
 function emptyTelemetry(): BattleTelemetry {
@@ -848,29 +844,17 @@ export function BattleArena({ mode, playerSkill, playerBotName, playerAppearance
 
   return (
     <section className="battle-shell" aria-label="Playable Sumobot prototype">
-      <div className="battle-topbar">
-        <div className="battle-bot-identity player">
-          <strong>{playerBotName}</strong>
-          <span><b>{playerSkill}</b> {playerSkill === "boost" ? "Speed ×1.5 · 3s" : "Reflect ×2 · 3s"}</span>
-        </div>
-        <strong className="battle-score player" aria-label={`${playerBotName} score ${scores.player}`}>{scores.player}</strong>
-        <span className="battle-time-stack">
-          <time className={`battle-clock ${timeLeft <= 15 ? "danger" : ""}`}>{formatTime(timeLeft)}</time>
-          <small>ROUND {round}/3</small>
-        </span>
-        <strong className="battle-score enemy" aria-label={`${battleType === "pvai" ? "Pebble" : "Rival"} score ${scores.enemy}`}>{scores.enemy}</strong>
-        <div className="battle-bot-identity enemy">
-          <strong>{battleType === "pvai" ? "Pebble" : "Rival"}</strong>
-          <span><b>STONE</b> Reflect ×2 · 3s</span>
-        </div>
-      </div>
-
-      <div className="arena-frame">
-        <canvas ref={canvasRef} width={WIDTH} height={HEIGHT} aria-label="Circular Sumobot arena" />
-        <button className="arena-leave-button" type="button" onClick={onExit}>Leave arena</button>
-        <div ref={playerVisualRef} className="arena-bot team-green"><BotVisual name={playerBotName} skill={playerSkill} appearance={playerAppearance} variant="arena" team="green" /><i className="direction-marker" /></div>
-        <div ref={enemyVisualRef} className="arena-bot team-red"><BotVisual name={battleType === "pvai" ? "Pebble" : "Rival"} skill="stone" appearance={ENEMY_APPEARANCE} variant="arena" team="red" /><i className="direction-marker" /></div>
-        <div className="battle-message">{message}</div>
+      <BattleViewport
+        canvasRef={canvasRef}
+        leftVisualRef={playerVisualRef}
+        rightVisualRef={enemyVisualRef}
+        left={{ name: playerBotName, botName: playerBotName, detail: playerSkill === "boost" ? "Speed ×1.5 · 3s" : "Reflect ×2 · 3s", skill: playerSkill, appearance: playerAppearance, score: scores.player }}
+        right={{ name: battleType === "pvai" ? "Pebble" : "Rival", botName: battleType === "pvai" ? "Pebble" : "Rival", detail: "Reflect ×2 · 3s", skill: "stone", appearance: ENEMY_APPEARANCE, score: scores.enemy }}
+        round={round}
+        timeSeconds={timeLeft}
+        message={message}
+        onLeave={onExit}
+      >
         {hasStarted && <BotDiagnosticsPanels left={playerDiagnostics} right={enemyDiagnostics} temporary={practice} />}
         {!running && !hasStarted && (
           <button className="start-battle" type="button" onClick={startMatch}>
@@ -878,7 +862,7 @@ export function BattleArena({ mode, playerSkill, playerBotName, playerAppearance
           </button>
         )}
         {!running && matchResult && matchTelemetry && matchReplay && <div className="match-finished-actions"><strong>{practice ? "Test complete" : "Match complete"}</strong><span>{practice ? "This test will not change rewards, rank, or script analytics." : "Claim the result to receive XP, gold, and campaign progress."}</span><div><button type="button" className="claim-reward" onClick={() => onMatchComplete(matchResult, matchTelemetry, matchReplay)}>{practice ? "Return to Lab" : "Claim rewards & exit"}</button><button type="button" onClick={startMatch}>Play again</button></div></div>}
-      </div>
+      </BattleViewport>
 
       <div className={`battle-controls arena-control-overlay ${mode} ${controlsOpen ? "open" : "collapsed"}`}>
         <div className="control-info">

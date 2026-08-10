@@ -35,6 +35,21 @@ test("authoritative simulation accepts actions and records replay frames", () =>
   assert.ok(state.bots.host.telemetry.actionCounts.forward >= 1);
 });
 
+test("continuous button state is applied at realtime tick intervals", () => {
+  const startedAt = 12_000;
+  const state = simulation.createOnlineMatch(startedAt, { playerId: "p1", bot: bot("Rivet") }, { playerId: "p2", bot: bot("Relay") });
+  const originalX = state.bots.host.x;
+
+  for (let tick = 1; tick <= 15; tick += 1) {
+    simulation.applyOnlineControlState(state, "host", { forward: true, turn: 1 });
+    simulation.advanceOnlineMatch(state, startedAt + Math.round(tick * 1000 / 30), "buttons", 60, 100);
+  }
+
+  assert.ok(state.bots.host.x > originalX, "held forward input should move on every server tick");
+  assert.ok(state.bots.host.angle > 0, "held turn input should rotate smoothly");
+  assert.equal(state.simulatedAt, startedAt + 500);
+});
+
 test("rapid timed inputs are queued and acknowledged in order", () => {
   const startedAt = 15_000;
   const state = simulation.createOnlineMatch(startedAt, { playerId: "p1", bot: bot("Rivet") }, { playerId: "p2", bot: bot("Relay") });
