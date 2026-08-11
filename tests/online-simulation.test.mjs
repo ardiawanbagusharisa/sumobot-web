@@ -79,6 +79,31 @@ test("script mode executes steering decisions and reports runtime errors", () =>
   assert.match(state.bots.host.scriptError ?? "", /Unknown function/);
 });
 
+test("authoritative collisions stun and disorient bots like local gameplay", () => {
+  const startedAt = 18_000;
+  const state = simulation.createOnlineMatch(startedAt, { playerId: "p1", bot: bot("Rivet") }, { playerId: "p2", bot: bot("Relay") });
+  state.bots.host.x = simulation.ONLINE_ARENA.x - 20;
+  state.bots.guest.x = simulation.ONLINE_ARENA.x + 20;
+  state.bots.host.vx = 180;
+  state.bots.guest.vx = -120;
+  state.bots.host.thrustUntil = startedAt + 1_000;
+  state.bots.guest.turnUntil = startedAt + 1_000;
+
+  simulation.advanceOnlineMatch(state, startedAt + 50, "script", 60, 100);
+
+  assert.ok(state.bots.host.stunnedUntil > state.simulatedAt);
+  assert.ok(state.bots.guest.stunnedUntil > state.simulatedAt);
+  assert.notEqual(state.bots.host.spinVelocity, 0);
+  assert.notEqual(state.bots.guest.spinVelocity, 0);
+  assert.equal(state.bots.host.thrustUntil, state.simulatedAt);
+  assert.equal(state.bots.guest.turnUntil, state.simulatedAt);
+
+  simulation.advanceOnlineMatch(state, startedAt + 1_000, "script", 60, 100);
+  const turns = state.bots.host.telemetry.actionCounts.turnleft + state.bots.host.telemetry.actionCounts.turnright
+    + state.bots.guest.telemetry.actionCounts.turnleft + state.bots.guest.telemetry.actionCounts.turnright;
+  assert.ok(turns > 0, "scripts should steer to recover from collision disorientation");
+});
+
 test("arena exit advances the best-of-three score", () => {
   const startedAt = 20_000;
   const state = simulation.createOnlineMatch(startedAt, { playerId: "p1", bot: bot("Rivet") }, { playerId: "p2", bot: bot("Relay") });

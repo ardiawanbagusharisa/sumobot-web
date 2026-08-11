@@ -190,7 +190,12 @@
 @media (max-width: 680px) { .bot-diagnostics-panel { width: 126px; gap: 4px; padding: 6px; }.bot-diagnostics-panel.left { left: 4px; }.bot-diagnostics-panel.right { right: 4px; }.bot-diagnostics-actions > span { grid-template-columns: 32px 1fr 12px; }.bot-diagnostics-heatmap { width: 48px; height: 48px; }.bot-diagnostics-metrics span:nth-child(1) { display: none; }.bot-diagnostics-metrics { grid-template-columns: 1fr 1fr; } }
 .arena-bot.stunned .bot-preview { filter: saturate(.25) brightness(1.35); }
 .arena-bot.stunned::before { border-color: #ffe66d; box-shadow: 0 0 22px #ffe66d; animation: stunBlink .12s alternate infinite; }
+.arena-bot.stone-active::before { border-color: #eef3fb; box-shadow: 0 0 26px rgba(238,243,251,.9),inset 0 0 16px rgba(238,243,251,.35); }
+.arena-bot.stone-active .bot-preview { filter: grayscale(.82) brightness(1.38); }
+.arena-bot.boost-active::before { border-color: #5de0e6; box-shadow: 0 0 28px rgba(93,224,230,.92); animation: boostPulse .35s ease-in-out infinite alternate; }
+.arena-bot.boost-active .bot-preview { filter: saturate(1.3) brightness(1.16); }
 @keyframes stunBlink { to { opacity: .35; transform: scale(.9); } }
+@keyframes boostPulse { to { transform: scale(1.09); opacity: .72; } }
 .arena-control-overlay .action-pad .instant-action.ready { border-color: rgba(184,255,61,.8); color: var(--ink); }
 .arena-control-overlay .action-pad .dash-action.ready { background: rgba(93,224,230,.92); box-shadow: 0 0 15px rgba(93,224,230,.3); }
 .arena-control-overlay .action-pad .skill-action.ready { background: rgba(255,209,102,.94); box-shadow: 0 0 15px rgba(255,209,102,.28); }

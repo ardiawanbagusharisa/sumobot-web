@@ -17,6 +17,14 @@ const STEP_MS = 50;
 const MAX_ADVANCE_MS = 15_000;
 const REPLAY_INTERVAL_MS = 200;
 const TELEMETRY_INTERVAL_MS = 250;
+const DISORIENTATION_DAMPING = 7;
+
+function collisionTurn(now: number, salt: number, minimumDegrees: number, maximumDegrees: number) {
+  const magnitudeSeed = Math.abs(Math.sin((now + salt) * 12.9898) * 43_758.5453);
+  const magnitude = minimumDegrees + (magnitudeSeed - Math.floor(magnitudeSeed)) * (maximumDegrees - minimumDegrees);
+  const direction = Math.sin((now + salt) * .731) < 0 ? -1 : 1;
+  return magnitude * Math.PI / 180 * direction;
+}
 
 function emptyTelemetry(): OnlineTelemetry {
   return {
@@ -268,7 +276,7 @@ function updateBot(bot: OnlineBotState, dt: number, now: number) {
   }
   if (Math.abs(bot.spinVelocity) > .001) {
     bot.angle = normalizeAngle(bot.angle + bot.spinVelocity * dt);
-    bot.spinVelocity *= Math.exp(-7 * dt);
+    bot.spinVelocity *= Math.exp(-DISORIENTATION_DAMPING * dt);
   }
   const stunned = now < bot.stunnedUntil;
   if (!stunned && now < bot.turnUntil) bot.angle = normalizeAngle(bot.angle + bot.turnDirection * 2.8 * dt);
@@ -303,8 +311,19 @@ function resolveCollision(state: OnlineMatchState) {
     host.telemetry.collisions += 1;
     guest.telemetry.collisions += 1;
     state.lastCollisionAt = state.simulatedAt;
-    if (!hostStone) host.stunnedUntil = Math.max(host.stunnedUntil, state.simulatedAt + 500);
-    if (!guestStone) guest.stunnedUntil = Math.max(guest.stunnedUntil, state.simulatedAt + 500);
+    const hostIsAttacker = Math.hypot(host.vx, host.vy) >= Math.hypot(guest.vx, guest.vy);
+    if (!hostStone) {
+      host.stunnedUntil = Math.max(host.stunnedUntil, state.simulatedAt + 500);
+      host.thrustUntil = state.simulatedAt;
+      host.turnUntil = state.simulatedAt;
+      host.spinVelocity += collisionTurn(state.simulatedAt, 17, hostIsAttacker ? 15 : 30, hostIsAttacker ? 90 : 120) * DISORIENTATION_DAMPING;
+    }
+    if (!guestStone) {
+      guest.stunnedUntil = Math.max(guest.stunnedUntil, state.simulatedAt + 500);
+      guest.thrustUntil = state.simulatedAt;
+      guest.turnUntil = state.simulatedAt;
+      guest.spinVelocity += collisionTurn(state.simulatedAt, 43, hostIsAttacker ? 30 : 15, hostIsAttacker ? 120 : 90) * DISORIENTATION_DAMPING;
+    }
   }
   const overlap = minimum - distance;
   if (hostStone) { guest.x += nx * overlap; guest.y += ny * overlap; }
@@ -315,8 +334,8 @@ function resolveCollision(state: OnlineMatchState) {
   }
   if (!approaching) return;
   const impact = Math.max(120, Math.hypot(host.vx - guest.vx, host.vy - guest.vy));
-  if (hostStone) { guest.vx = nx * impact * 2; guest.vy = ny * impact * 2; }
-  else if (guestStone) { host.vx = -nx * impact * 2; host.vy = -ny * impact * 2; }
+  if (hostStone) { guest.vx = nx * impact * GAME_RULES.skills.stoneReflectMultiplier; guest.vy = ny * impact * GAME_RULES.skills.stoneReflectMultiplier; }
+  else if (guestStone) { host.vx = -nx * impact * GAME_RULES.skills.stoneReflectMultiplier; host.vy = -ny * impact * GAME_RULES.skills.stoneReflectMultiplier; }
   else {
     const impulse = relative * .92;
     host.vx += nx * impulse; host.vy += ny * impulse;

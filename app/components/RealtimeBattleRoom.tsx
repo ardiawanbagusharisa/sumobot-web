@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { GAME_RULES } from "@/lib/game/rules";
-import type { OnlineActionName, OnlineActionResult, OnlineBotSelection, OnlineBotState, OnlineMatchState, OnlineRoomView, RoomSide } from "@/lib/online/types";
+import type { OnlineActionName, OnlineActionResult, OnlineBotSelection, OnlineBotState, OnlineMatchState, OnlineRoomView } from "@/lib/online/types";
 import type { RealtimeConnectionTicket, RealtimeServerMessage } from "@/lib/online/realtime-protocol";
 import { ONLINE_ARENA } from "@/lib/online/simulation";
 import { BattleViewport } from "./BattleViewport";
@@ -18,7 +18,9 @@ interface OnlineBattleRoomProps {
 }
 
 type TransportState = "discovering" | "connecting" | "realtime" | "reconnecting" | "compatibility";
-type RenderBot = Pick<OnlineBotState, "x" | "y" | "angle" | "stunnedUntil">;
+type RenderBot = Pick<OnlineBotState, "x" | "y" | "angle" | "vx" | "vy" | "turnUntil" | "turnDirection" | "spinVelocity" | "stunnedUntil" | "skillUntil" | "skill">;
+interface WheelTrail { x: number; y: number; life: number; maxLife: number; color: string }
+interface CollisionParticle { x: number; y: number; vx: number; vy: number; life: number; maxLife: number; size: number; color: string }
 
 const ACTION_REJECTION_COPY: Record<NonNullable<OnlineActionResult["reason"]>, string> = {
   interval: "waiting for the next action tick",
@@ -73,10 +75,23 @@ function normalizeAngle(angle: number) {
   return angle;
 }
 
+function renderBotState(bot: OnlineBotState): RenderBot {
+  return { x: bot.x, y: bot.y, angle: bot.angle, vx: bot.vx, vy: bot.vy, turnUntil: bot.turnUntil, turnDirection: bot.turnDirection, spinVelocity: bot.spinVelocity, stunnedUntil: bot.stunnedUntil, skillUntil: bot.skillUntil, skill: bot.skill };
+}
+
+function collisionBurst(x: number, y: number) {
+  return Array.from({ length: 12 }, (_, index): CollisionParticle => {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 65 + Math.random() * 135;
+    const life = .28 + Math.random() * .28;
+    return { x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, life, maxLife: life, size: 1.5 + Math.random() * 3, color: index % 3 === 0 ? "#f5f3ea" : index % 2 === 0 ? "#b8ff3d" : "#ff554f" };
+  });
+}
+
 export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfileChanged }: OnlineBattleRoomProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const ownVisualRef = useRef<HTMLDivElement>(null);
-  const opponentVisualRef = useRef<HTMLDivElement>(null);
+  const hostVisualRef = useRef<HTMLDivElement>(null);
+  const guestVisualRef = useRef<HTMLDivElement>(null);
   const roomRef = useRef<OnlineRoomView | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const transportRef = useRef<TransportState>("discovering");
@@ -85,8 +100,14 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
   const heldRef = useRef<Set<OnlineActionName>>(new Set());
   const actionSequenceRef = useRef(0);
   const pendingActionsRef = useRef(new Map<number, (result: OnlineActionResult | null) => void>());
-  const targetBotsRef = useRef<{ own: RenderBot; opponent: RenderBot } | null>(null);
-  const renderedBotsRef = useRef<{ own: RenderBot; opponent: RenderBot } | null>(null);
+  const targetBotsRef = useRef<{ host: RenderBot; guest: RenderBot } | null>(null);
+  const renderedBotsRef = useRef<{ host: RenderBot; guest: RenderBot } | null>(null);
+  const targetReceivedAtRef = useRef(0);
+  const renderedRoundRef = useRef<number | null>(null);
+  const collisionCountRef = useRef<number | null>(null);
+  const wheelTrailsRef = useRef<WheelTrail[]>([]);
+  const collisionParticlesRef = useRef<CollisionParticle[]>([]);
+  const nextTrailAtRef = useRef(0);
   const completedRef = useRef(false);
   const [room, setRoom] = useState<OnlineRoomView | null>(null);
   const [botId, setBotId] = useState(selectedBotId);
@@ -122,7 +143,9 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
       const response = await fetch(`/api/rooms?roomId=${encodeURIComponent(roomId)}`, { cache: "no-store" });
       const payload = await response.json() as { room?: OnlineRoomView; error?: string };
       if (!response.ok || !payload.room) throw new Error(payload.error ?? "Room unavailable.");
-      applyRoom(payload.room);
+      const active = roomRef.current;
+      const preserveAuthoritativeSnapshot = transportRef.current === "realtime" && active?.status === "live" && payload.room.status === "live";
+      applyRoom(preserveAuthoritativeSnapshot ? { ...payload.room, match: active.match } : payload.room);
       if (transportRef.current === "compatibility") setMessage("Compatibility transport · realtime service unavailable");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Connection interrupted.");
@@ -280,19 +303,24 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
     return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); window.clearInterval(timer); held.clear(); sendControlState(); };
   }, [room?.actionIntervalMs, room?.controlMode, room?.status, sendAction, sendControlState, transport]);
 
-  const viewBot = useCallback((bot: OnlineBotState, ownSide: RoomSide): RenderBot => ownSide === "guest"
-    ? { x: ONLINE_ARENA.width - bot.x, y: bot.y, angle: normalizeAngle(Math.PI - bot.angle), stunnedUntil: bot.stunnedUntil }
-    : { x: bot.x, y: bot.y, angle: bot.angle, stunnedUntil: bot.stunnedUntil }, []);
-
   useEffect(() => {
     const match = room?.match;
     if (!match) return;
-    const ownSide = room.currentSide;
-    const opponentSide: RoomSide = ownSide === "host" ? "guest" : "host";
-    const next = { own: viewBot(match.bots[ownSide], ownSide), opponent: viewBot(match.bots[opponentSide], ownSide) };
+    const next = { host: renderBotState(match.bots.host), guest: renderBotState(match.bots.guest) };
     targetBotsRef.current = next;
-    renderedBotsRef.current ??= structuredClone(next);
-  }, [room?.currentSide, room?.match, viewBot]);
+    targetReceivedAtRef.current = performance.now();
+    if (!renderedBotsRef.current || renderedRoundRef.current !== match.round) {
+      renderedBotsRef.current = structuredClone(next);
+      renderedRoundRef.current = match.round;
+      wheelTrailsRef.current = [];
+      collisionParticlesRef.current = [];
+    }
+    const collisions = Math.max(match.bots.host.telemetry.collisions, match.bots.guest.telemetry.collisions);
+    if (collisionCountRef.current != null && collisions > collisionCountRef.current) {
+      collisionParticlesRef.current.push(...collisionBurst((next.host.x + next.guest.x) / 2, (next.host.y + next.guest.y) / 2));
+    }
+    collisionCountRef.current = collisions;
+  }, [room?.match]);
 
   useEffect(() => {
     if (!battleViewportMounted) return;
@@ -303,20 +331,43 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
     let previous = performance.now();
     const render = (now: number) => {
       const dt = Math.min(.05, (now - previous) / 1000); previous = now;
+      drawArena(canvas);
       const target = targetBotsRef.current;
       const rendered = renderedBotsRef.current;
       if (target && rendered) {
-        const blend = 1 - Math.exp(-16 * dt);
-        for (const key of ["own", "opponent"] as const) {
-          rendered[key].x += (target[key].x - rendered[key].x) * blend;
-          rendered[key].y += (target[key].y - rendered[key].y) * blend;
-          rendered[key].angle = normalizeAngle(rendered[key].angle + normalizeAngle(target[key].angle - rendered[key].angle) * blend);
+        const extrapolation = Math.min(.1, Math.max(0, (now - targetReceivedAtRef.current) / 1000));
+        const simulatedNow = (roomRef.current?.match?.simulatedAt ?? 0) + extrapolation * 1000;
+        const blend = 1 - Math.exp(-20 * dt);
+        for (const key of ["host", "guest"] as const) {
+          const desiredX = target[key].x + target[key].vx * extrapolation;
+          const desiredY = target[key].y + target[key].vy * extrapolation;
+          let desiredAngle = target[key].angle + target[key].spinVelocity * extrapolation;
+          if (simulatedNow >= target[key].stunnedUntil && simulatedNow < target[key].turnUntil) desiredAngle += target[key].turnDirection * 2.8 * extrapolation;
+          rendered[key].x += (desiredX - rendered[key].x) * blend;
+          rendered[key].y += (desiredY - rendered[key].y) * blend;
+          rendered[key].angle = normalizeAngle(rendered[key].angle + normalizeAngle(desiredAngle - rendered[key].angle) * blend);
+          rendered[key].vx = target[key].vx;
+          rendered[key].vy = target[key].vy;
+          rendered[key].turnUntil = target[key].turnUntil;
+          rendered[key].turnDirection = target[key].turnDirection;
+          rendered[key].spinVelocity = target[key].spinVelocity;
           rendered[key].stunnedUntil = target[key].stunnedUntil;
+          rendered[key].skillUntil = target[key].skillUntil;
+          rendered[key].skill = target[key].skill;
         }
-        if (transportRef.current === "realtime" && roomRef.current?.controlMode === "buttons") {
-          const turn = heldRef.current.has("turnleft") ? -1 : heldRef.current.has("turnright") ? 1 : 0;
-          rendered.own.angle = normalizeAngle(rendered.own.angle + turn * 2.8 * dt);
-          if (heldRef.current.has("forward")) { rendered.own.x += Math.cos(rendered.own.angle) * 105 * dt; rendered.own.y += Math.sin(rendered.own.angle) * 105 * dt; }
+        if (now >= nextTrailAtRef.current && roomRef.current?.match?.phase === "live") {
+          for (const key of ["host", "guest"] as const) {
+            if (Math.hypot(target[key].vx, target[key].vy) < 18) continue;
+            const offsetX = -Math.sin(rendered[key].angle) * 18;
+            const offsetY = Math.cos(rendered[key].angle) * 18;
+            const color = key === "host" ? "#b8ff3d" : "#ff554f";
+            wheelTrailsRef.current.push(
+              { x: rendered[key].x + offsetX, y: rendered[key].y + offsetY, life: .55, maxLife: .55, color },
+              { x: rendered[key].x - offsetX, y: rendered[key].y - offsetY, life: .55, maxLife: .55, color },
+            );
+          }
+          wheelTrailsRef.current = wheelTrailsRef.current.slice(-180);
+          nextTrailAtRef.current = now + 42;
         }
         const scaleX = canvas.clientWidth / ONLINE_ARENA.width;
         const scaleY = canvas.clientHeight / ONLINE_ARENA.height;
@@ -326,10 +377,35 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
           element.style.left = `${bot.x * scaleX - 32}px`;
           element.style.top = `${bot.y * scaleY - 32}px`;
           element.style.transform = `rotate(${bot.angle}rad) scale(${scale})`;
-          element.classList.toggle("stunned", (roomRef.current?.match?.simulatedAt ?? 0) < bot.stunnedUntil);
+          element.classList.toggle("stunned", simulatedNow < bot.stunnedUntil);
+          element.classList.toggle("stone-active", bot.skill === "stone" && simulatedNow < bot.skillUntil);
+          element.classList.toggle("boost-active", bot.skill === "boost" && simulatedNow < bot.skillUntil);
         };
-        position(ownVisualRef.current, rendered.own);
-        position(opponentVisualRef.current, rendered.opponent);
+        position(hostVisualRef.current, rendered.host);
+        position(guestVisualRef.current, rendered.guest);
+      }
+      const context = canvas.getContext("2d");
+      if (context) {
+        context.save();
+        wheelTrailsRef.current = wheelTrailsRef.current.filter((point) => {
+          point.life -= dt;
+          if (point.life <= 0) return false;
+          context.globalAlpha = Math.pow(point.life / point.maxLife, 1.5) * .52;
+          context.fillStyle = point.color;
+          context.beginPath(); context.arc(point.x, point.y, 2.3, 0, Math.PI * 2); context.fill();
+          return true;
+        });
+        collisionParticlesRef.current = collisionParticlesRef.current.filter((particle) => {
+          particle.life -= dt;
+          if (particle.life <= 0) return false;
+          particle.x += particle.vx * dt; particle.y += particle.vy * dt;
+          particle.vx *= Math.pow(.07, dt); particle.vy *= Math.pow(.07, dt);
+          context.globalAlpha = particle.life / particle.maxLife;
+          context.fillStyle = particle.color;
+          context.beginPath(); context.arc(particle.x, particle.y, particle.size * (particle.life / particle.maxLife), 0, Math.PI * 2); context.fill();
+          return true;
+        });
+        context.restore();
       }
       frame = requestAnimationFrame(render);
     };
@@ -410,13 +486,8 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
   const match = room.match;
   if (!match || !room.guest) return <section className="online-lobby loading"><strong>Synchronizing match state</strong><span>{message}</span></section>;
   const ownSide = room.currentSide;
-  const opponentSide: RoomSide = ownSide === "host" ? "guest" : "host";
   const ownPlayer = ownSide === "host" ? room.host : room.guest;
-  const opponentPlayer = ownSide === "host" ? room.guest : room.host;
   const ownBot = match.bots[ownSide];
-  const opponentBot = match.bots[opponentSide];
-  const ownScore = match.scores[ownSide];
-  const opponentScore = match.scores[opponentSide];
   const remaining = Math.max(0, room.roundSeconds - (match.simulatedAt - match.roundStartedAt) / 1000);
   const cooldowns = {
     dash: Math.max(0, (ownBot.dashReadyAt - match.simulatedAt) / 1000),
@@ -430,17 +501,17 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
   return <section className="battle-shell" aria-label="Online Sumobot battle">
     <BattleViewport
       canvasRef={canvasRef}
-      leftVisualRef={ownVisualRef}
-      rightVisualRef={opponentVisualRef}
-      left={{ name: ownPlayer.displayName, botName: ownPlayer.bot.name, detail: ownPlayer.bot.skill === "boost" ? "Speed ×1.5 · 3s" : "Reflect ×2 · 3s", skill: ownPlayer.bot.skill, appearance: ownPlayer.bot.appearance, score: ownScore }}
-      right={{ name: opponentPlayer.displayName, botName: opponentPlayer.bot.name, detail: opponentPlayer.bot.skill === "boost" ? "Speed ×1.5 · 3s" : "Reflect ×2 · 3s", skill: opponentPlayer.bot.skill, appearance: opponentPlayer.bot.appearance, score: opponentScore }}
+      leftVisualRef={hostVisualRef}
+      rightVisualRef={guestVisualRef}
+      left={{ name: room.host.displayName, botName: room.host.bot.name, detail: room.host.bot.skill === "boost" ? "Speed ×1.5 · 3s" : "Reflect ×2 · 3s", skill: room.host.bot.skill, appearance: room.host.bot.appearance, score: match.scores.host }}
+      right={{ name: room.guest.displayName, botName: room.guest.bot.name, detail: room.guest.bot.skill === "boost" ? "Speed ×1.5 · 3s" : "Reflect ×2 · 3s", skill: room.guest.bot.skill, appearance: room.guest.bot.appearance, score: match.scores.guest }}
       round={match.round}
       timeSeconds={remaining}
       message={networkMessage}
       onLeave={() => void leave()}
       leaveLabel="Leave arena"
     >
-      <BotDiagnosticsPanels left={diagnosticSnapshot(ownBot)} right={diagnosticSnapshot(opponentBot)} />
+      <BotDiagnosticsPanels left={diagnosticSnapshot(match.bots.host)} right={diagnosticSnapshot(match.bots.guest)} />
       {room.status === "completed" && <div className="match-finished-actions"><strong>{room.completionReason === "disconnect" ? "Opponent disconnected" : "Match complete"}</strong><span>Rewards and leaderboard points were applied online.</span><div><button type="button" className="claim-reward" onClick={onExit}>Return to rooms</button></div></div>}
     </BattleViewport>
 
