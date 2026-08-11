@@ -101,6 +101,7 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
   const [controlsOpen, setControlsOpen] = useState(() => typeof window === "undefined" || !window.matchMedia("(max-width: 680px)").matches);
   const [terminalOpen, setTerminalOpen] = useState(true);
   const [scriptOpen, setScriptOpen] = useState(true);
+  const battleViewportMounted = Boolean(room?.match && room.guest && (room.status === "live" || room.status === "completed"));
 
   const setTransport = useCallback((next: TransportState) => {
     transportRef.current = next;
@@ -294,6 +295,7 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
   }, [room?.currentSide, room?.match, viewBot]);
 
   useEffect(() => {
+    if (!battleViewportMounted) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     drawArena(canvas);
@@ -333,7 +335,7 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
     };
     frame = requestAnimationFrame(render);
     return () => cancelAnimationFrame(frame);
-  }, []);
+  }, [battleViewportMounted]);
 
   useEffect(() => () => {
     const socket = socketRef.current;
