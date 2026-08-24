@@ -1,6 +1,7 @@
 import { getDatabase } from "@/lib/db/server";
 import { ensureAuthSchema, type AuthUser } from "@/lib/auth/server";
 import { ensureProfileSchema, getOnlineProfile } from "@/lib/profile/server";
+import { roomSynchronizationNeedsPersistence } from "@/lib/online/polling";
 import { ensureMatchSchema } from "@/lib/matches/server";
 import { MATCH_OUTCOME_RULES, type ControlMode, type MatchResult } from "@/lib/game/rules";
 import { parseBotScript } from "@/lib/game/script-runtime";
@@ -337,8 +338,22 @@ export async function synchronizeOnlineRoom(user: AuthUser, roomId: string) {
     const side = roomSide(row, user.id);
     if (!side) throw new Error("You are not a player in this room.");
     if (row.status === "completed") return viewRoom(row, user.id);
+    const nowMs = Date.now();
+    const shouldPersist = roomSynchronizationNeedsPersistence({
+      status: row.status,
+      lastSeenAt: side === "host" ? row.lastHostSeenAt : row.lastGuestSeenAt,
+      guestPresent: Boolean(row.guestPlayerId),
+      hostReady: Boolean(row.hostReady),
+      guestReady: Boolean(row.guestReady),
+      hostSetupDeadline: row.hostSetupDeadline,
+      guestSetupDeadline: row.guestSetupDeadline,
+      countdownStartedAt: row.countdownStartedAt,
+      realtimeStartedAt: row.realtimeStartedAt,
+      hasMatchState: Boolean(row.matchState),
+    }, nowMs);
+    if (!shouldPersist) return viewRoom(row, user.id);
     const expected = row.version;
-    synchronizeState(row, side, Date.now());
+    synchronizeState(row, side, nowMs);
     if (await saveRoom(row, expected)) {
       if ((row.status as RoomStatus) === "completed") await finalizeOnlineRoom(row);
       return viewRoom(row, user.id);

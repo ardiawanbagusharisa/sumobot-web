@@ -1,4 +1,5 @@
 import { getDatabase } from "@/lib/db/server";
+import { defaultOnlineProfile } from "@/lib/profile/default";
 
 const SESSION_COOKIE = "sumobot_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
@@ -51,6 +52,13 @@ export async function ensureAuthSchema() {
       expires_at INTEGER NOT NULL,
       created_at TEXT NOT NULL
     )`),
+    d1.prepare(`CREATE TABLE IF NOT EXISTS online_profiles (
+      player_id TEXT PRIMARY KEY NOT NULL REFERENCES players(id),
+      profile TEXT NOT NULL,
+      revision INTEGER NOT NULL DEFAULT 1,
+      imported_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`),
     d1.prepare("CREATE INDEX IF NOT EXISTS idx_auth_sessions_player ON auth_sessions(player_id)"),
   ]);
   schemaReady = true;
@@ -80,15 +88,18 @@ export async function registerAccount(loginId: string, password: string) {
   const salt = randomHex(16);
   const passwordHash = await derivePasswordHash(password, salt, PASSWORD_ITERATIONS);
   const now = new Date().toISOString();
+  const profile = defaultOnlineProfile();
   await d1.batch([
     d1.prepare(`INSERT INTO players
       (id, handle, display_name, level, total_xp, gold_balance, unlocked_modes, created_at, updated_at)
-      VALUES (?, ?, ?, 1, 0, 0, '["buttons"]', ?, ?)`)
-      .bind(playerId, loginId, loginId, now, now),
+      VALUES (?, ?, ?, 1, ?, ?, '["buttons"]', ?, ?)`)
+      .bind(playerId, loginId, loginId, profile.xp, profile.gold, now, now),
     d1.prepare(`INSERT INTO auth_credentials
       (player_id, password_hash, password_salt, password_iterations, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?)`)
       .bind(playerId, passwordHash, salt, PASSWORD_ITERATIONS, now, now),
+    d1.prepare("INSERT INTO online_profiles (player_id, profile, revision, imported_at, updated_at) VALUES (?, ?, 1, ?, ?)")
+      .bind(playerId, JSON.stringify(profile), now, now),
   ]);
   return createSession({ id: playerId, handle: loginId, displayName: loginId });
 }

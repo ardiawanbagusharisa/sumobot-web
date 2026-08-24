@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { GAME_RULES, type ControlMode } from "@/lib/game/rules";
+import { roomListPollDelay } from "@/lib/online/polling";
 import type { OnlineActionName, OnlineActionResult, OnlineBotSelection, OnlineRoomSummary, OnlineRoomView, RoomSide } from "@/lib/online/types";
 import { ONLINE_ARENA } from "@/lib/online/simulation";
 import { BotVisual } from "./BotVisual";
@@ -50,6 +51,8 @@ function actionFeedback(result: OnlineActionResult) {
 export function OnlineRoomBrowser({ bots, selectedBotId, mode, roundSeconds, actionIntervalMs, onJoined }: OnlineRoomBrowserProps) {
   const [rooms, setRooms] = useState<OnlineRoomSummary[]>([]);
   const [query, setQuery] = useState("");
+  const [activeQuery, setActiveQuery] = useState("");
+  const [pageVisible, setPageVisible] = useState(() => typeof document === "undefined" || !document.hidden);
   const [privateRoom, setPrivateRoom] = useState(false);
   const [createCode, setCreateCode] = useState("");
   const [joinCodes, setJoinCodes] = useState<Record<string, string>>({});
@@ -59,7 +62,7 @@ export function OnlineRoomBrowser({ bots, selectedBotId, mode, roundSeconds, act
   const [message, setMessage] = useState("Live room list updates automatically.");
   const selectedBot = bots.find((bot) => bot.id === selectedBotId) ?? bots[0];
 
-  const refresh = useCallback(async (search = query) => {
+  const refresh = useCallback(async (search: string) => {
     try {
       const response = await fetch(`/api/rooms${search.trim() ? `?query=${encodeURIComponent(search.trim())}` : ""}`, { cache: "no-store" });
       const payload = await response.json() as { rooms?: OnlineRoomSummary[] };
@@ -71,13 +74,26 @@ export function OnlineRoomBrowser({ bots, selectedBotId, mode, roundSeconds, act
     } catch {
       setMessage("Room list is temporarily unavailable.");
     }
-  }, [query]);
+  }, []);
 
   useEffect(() => {
-    const initial = window.setTimeout(() => void refresh(), 0);
-    const timer = window.setInterval(() => void refresh(), 2500);
-    return () => { window.clearTimeout(initial); window.clearInterval(timer); };
-  }, [refresh]);
+    const updateVisibility = () => setPageVisible(!document.hidden);
+    document.addEventListener("visibilitychange", updateVisibility);
+    return () => document.removeEventListener("visibilitychange", updateVisibility);
+  }, []);
+
+  useEffect(() => {
+    const delay = roomListPollDelay(pageVisible);
+    if (delay == null) return;
+    let cancelled = false;
+    let timer = 0;
+    const loop = async () => {
+      await refresh(activeQuery);
+      if (!cancelled) timer = window.setTimeout(() => void loop(), delay);
+    };
+    void loop();
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [activeQuery, pageVisible, refresh]);
 
   const createRoom = async () => {
     if (!selectedBot) return;
@@ -103,7 +119,12 @@ export function OnlineRoomBrowser({ bots, selectedBotId, mode, roundSeconds, act
     } finally { joinBusyRef.current = false; setBusy(false); setJoiningRoomId(null); }
   };
 
-  const search = (event: FormEvent) => { event.preventDefault(); void refresh(query); };
+  const search = (event: FormEvent) => {
+    event.preventDefault();
+    const nextQuery = query.trim();
+    if (nextQuery === activeQuery) void refresh(nextQuery);
+    else setActiveQuery(nextQuery);
+  };
 
   return (
     <section className="online-room-browser" aria-label="Online PvP rooms">

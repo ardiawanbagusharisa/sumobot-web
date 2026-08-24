@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { GAME_RULES } from "@/lib/game/rules";
+import { roomPollDelay, type OnlineTransportState } from "@/lib/online/polling";
 import type { OnlineActionName, OnlineActionResult, OnlineBotSelection, OnlineBotState, OnlineMatchState, OnlineRoomView } from "@/lib/online/types";
 import type { RealtimeConnectionTicket, RealtimeServerMessage } from "@/lib/online/realtime-protocol";
 import { ONLINE_ARENA } from "@/lib/online/simulation";
@@ -17,7 +18,6 @@ interface OnlineBattleRoomProps {
   onProfileChanged: () => void;
 }
 
-type TransportState = "discovering" | "connecting" | "realtime" | "reconnecting" | "compatibility";
 type RenderBot = Pick<OnlineBotState, "x" | "y" | "angle" | "vx" | "vy" | "turnUntil" | "turnDirection" | "spinVelocity" | "stunnedUntil" | "skillUntil" | "skill">;
 interface WheelTrail { x: number; y: number; life: number; maxLife: number; color: string }
 interface CollisionParticle { x: number; y: number; vx: number; vy: number; life: number; maxLife: number; size: number; color: string }
@@ -94,7 +94,7 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
   const guestVisualRef = useRef<HTMLDivElement>(null);
   const roomRef = useRef<OnlineRoomView | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
-  const transportRef = useRef<TransportState>("discovering");
+  const transportRef = useRef<OnlineTransportState>("discovering");
   const connectingRef = useRef(false);
   const realtimeStartedRef = useRef(false);
   const heldRef = useRef<Set<OnlineActionName>>(new Set());
@@ -111,7 +111,8 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
   const completedRef = useRef(false);
   const [room, setRoom] = useState<OnlineRoomView | null>(null);
   const [botId, setBotId] = useState(selectedBotId);
-  const [transport, setTransportState] = useState<TransportState>("discovering");
+  const [transport, setTransportState] = useState<OnlineTransportState>("discovering");
+  const [pageVisible, setPageVisible] = useState(() => typeof document === "undefined" || !document.hidden);
   const [reconnectNonce, setReconnectNonce] = useState(0);
   const [latency, setLatency] = useState<number | null>(null);
   const [command, setCommand] = useState("");
@@ -124,7 +125,7 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
   const [scriptOpen, setScriptOpen] = useState(true);
   const battleViewportMounted = Boolean(room?.match && room.guest && (room.status === "live" || room.status === "completed"));
 
-  const setTransport = useCallback((next: TransportState) => {
+  const setTransport = useCallback((next: OnlineTransportState) => {
     transportRef.current = next;
     setTransportState(next);
   }, []);
@@ -137,6 +138,12 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
       onProfileChanged();
     }
   }, [onProfileChanged]);
+
+  useEffect(() => {
+    const updateVisibility = () => setPageVisible(!document.hidden);
+    document.addEventListener("visibilitychange", updateVisibility);
+    return () => document.removeEventListener("visibilitychange", updateVisibility);
+  }, []);
 
   const poll = useCallback(async () => {
     try {
@@ -158,13 +165,13 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
     const loop = async () => {
       setClock(Date.now());
       await poll();
-      const current = roomRef.current;
-      const delay = current?.status === "live" ? (transportRef.current === "compatibility" ? 120 : 2000) : 400;
-      if (!cancelled) timer = window.setTimeout(() => void loop(), delay);
+      const delay = roomPollDelay(roomRef.current?.status ?? null, transportRef.current, pageVisible);
+      if (!cancelled && delay != null) timer = window.setTimeout(() => void loop(), delay);
     };
-    void loop();
+    const initialDelay = roomPollDelay(roomRef.current?.status ?? null, transportRef.current, pageVisible);
+    if (initialDelay != null) void loop();
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [poll]);
+  }, [pageVisible, poll, transport]);
 
   const completeFromRealtime = useCallback(async (state: OnlineMatchState, proof: Extract<RealtimeServerMessage, { type: "complete" }>["proof"]) => {
     const current = roomRef.current;
