@@ -3,7 +3,7 @@ import { ensureAuthSchema, type AuthUser } from "@/lib/auth/server";
 import { ensureProfileSchema, getOnlineProfile } from "@/lib/profile/server";
 import { roomSynchronizationNeedsPersistence } from "@/lib/online/polling";
 import { ensureMatchSchema } from "@/lib/matches/server";
-import { MATCH_OUTCOME_RULES, type ControlMode, type MatchResult } from "@/lib/game/rules";
+import { MATCH_OUTCOME_RULES, normalizeActionIntervalMs, type ControlMode, type MatchResult } from "@/lib/game/rules";
 import { parseBotScript } from "@/lib/game/script-runtime";
 import { advanceOnlineMatch, createOnlineMatch, forfeitOnlineMatch, ONLINE_ARENA, performOnlineActionDetailed } from "@/lib/online/simulation";
 import { hashRealtimePayload, signRealtimeTicket, verifyCompletionProof } from "@/lib/online/realtime-auth";
@@ -87,6 +87,16 @@ export async function ensureOnlineRoomSchema() {
     )`),
     d1.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_online_reward_room_player ON online_reward_claims(room_id, player_id)"),
   ]);
+  const roomColumns = await d1.prepare("PRAGMA table_info(online_rooms)").all<{ name: string }>();
+  if (!roomColumns.results.some((column) => column.name === "realtime_started_at")) {
+    try {
+      await d1.prepare("ALTER TABLE online_rooms ADD COLUMN realtime_started_at INTEGER").run();
+    } catch (error) {
+      const refreshedColumns = await d1.prepare("PRAGMA table_info(online_rooms)").all<{ name: string }>();
+      if (!refreshedColumns.results.some((column) => column.name === "realtime_started_at")) throw error;
+    }
+  }
+  await d1.prepare("PRAGMA optimize").run();
   schemaReady = true;
 }
 
@@ -220,7 +230,7 @@ export async function createOnlineRoom(user: AuthUser, input: { isPrivate: boole
   const bot = validateBot(input.bot, input.controlMode);
   if (!bot) return { error: "Select a valid bot and script before creating the room.", status: 400 as const };
   const roundSeconds = Math.max(15, Math.min(120, Math.round(input.roundSeconds)));
-  const actionIntervalMs = Math.max(50, Math.min(3000, Math.round(input.actionIntervalMs)));
+  const actionIntervalMs = normalizeActionIntervalMs(input.actionIntervalMs);
   const accessCode = input.accessCode?.trim() ?? "";
   if (input.isPrivate && (accessCode.length < 4 || accessCode.length > 24)) return { error: "Private codes must be 4-24 characters.", status: 400 as const };
   const d1 = await getDatabase();

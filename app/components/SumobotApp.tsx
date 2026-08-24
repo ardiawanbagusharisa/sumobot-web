@@ -4,7 +4,7 @@ import { BattleArena, type BattleReplayData, type BattleTelemetry } from "./Batt
 import { BattleReplay } from "./BattleReplay";
 import { BotVisual, type BotAppearance } from "./BotVisual";
 import { campaignChapters, marketItems } from "@/lib/game/prototype-data";
-import { FSM_SCRIPT, MATCH_REWARDS, PRIMITIVE_SCRIPT, RANK_POINTS, STARTER_SCRIPT, type ControlMode, type MatchResult, type SkillType } from "@/lib/game/rules";
+import { FSM_SCRIPT, MATCH_REWARDS, normalizeActionIntervalMs, PRIMITIVE_SCRIPT, RANK_POINTS, STARTER_SCRIPT, type ControlMode, type MatchResult, type SkillType } from "@/lib/game/rules";
 import { migrateLegacyJsonScript, parseBotScript } from "@/lib/game/script-runtime";
 import { HOME_DEMO_META, HOME_DEMO_REPLAY } from "@/lib/game/demo-replay";
 import { OnlineRoomBrowser } from "./OnlineRooms";
@@ -498,8 +498,7 @@ export function SumobotApp() {
         setScriptStatus(`${target.name} deleted`);
     };
     const applyCustomTick = () => {
-        const parsed = Number(customTick);
-        const next = Number.isFinite(parsed) ? Math.round(Math.min(3000, Math.max(50, parsed))) : actionIntervalMs;
+        const next = normalizeActionIntervalMs(customTick, actionIntervalMs);
         setActionIntervalMs(next);
         setCustomTick(String(next));
     };

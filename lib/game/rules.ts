@@ -15,6 +15,11 @@ export const GAME_RULES = {
     maximum: 3,
     step: 0.1,
   },
+  actionIntervalMs: {
+    minimum: 50,
+    maximum: 3000,
+    default: 250,
+  },
   dash: {
     cooldownSeconds: 1,
     force: 520,
@@ -29,6 +34,13 @@ export const GAME_RULES = {
     decisionIntervalMs: 450,
   },
 } as const;
+
+export function normalizeActionIntervalMs(value: unknown, fallback: number = GAME_RULES.actionIntervalMs.default) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  const fallbackValue = Number.isFinite(fallback) ? fallback : GAME_RULES.actionIntervalMs.default;
+  const finite = Number.isFinite(parsed) ? parsed : fallbackValue;
+  return Math.round(Math.min(GAME_RULES.actionIntervalMs.maximum, Math.max(GAME_RULES.actionIntervalMs.minimum, finite)));
+}
 
 export interface MatchOutcomeRule {
   rankPoints: number;

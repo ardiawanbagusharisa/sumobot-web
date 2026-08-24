@@ -25,6 +25,16 @@ const simulation = loadCommonJs("../lib/online/simulation.ts", (request) => {
 const appearance = { wheel: "#111", body: "#222", face: "#333", accessory: "#444" };
 const bot = (id, skill = "boost") => ({ id, name: id, skill, scriptSource: rules.PRIMITIVE_SCRIPT, appearance });
 
+test("game tick presets and custom values are normalized consistently", () => {
+  assert.equal(rules.normalizeActionIntervalMs(100), 100);
+  assert.equal(rules.normalizeActionIntervalMs(250), 250);
+  assert.equal(rules.normalizeActionIntervalMs(500), 500);
+  assert.equal(rules.normalizeActionIntervalMs("173"), 173);
+  assert.equal(rules.normalizeActionIntervalMs(12), 50);
+  assert.equal(rules.normalizeActionIntervalMs(9_999), 3000);
+  assert.equal(rules.normalizeActionIntervalMs("invalid", 500), 500);
+});
+
 test("authoritative simulation accepts actions and records replay frames", () => {
   const startedAt = 10_000;
   const state = simulation.createOnlineMatch(startedAt, { playerId: "p1", bot: bot("Rivet") }, { playerId: "p2", bot: bot("Relay", "stone") });
@@ -35,19 +45,36 @@ test("authoritative simulation accepts actions and records replay frames", () =>
   assert.ok(state.bots.host.telemetry.actionCounts.forward >= 1);
 });
 
-test("continuous button state is applied at realtime tick intervals", () => {
-  const startedAt = 12_000;
-  const state = simulation.createOnlineMatch(startedAt, { playerId: "p1", bot: bot("Rivet") }, { playerId: "p2", bot: bot("Relay") });
-  const originalX = state.bots.host.x;
+test("realtime button controls are sampled at each configured game tick", () => {
+  for (const actionIntervalMs of [100, 250, 500, 173]) {
+    const startedAt = 12_000;
+    const state = simulation.createOnlineMatch(startedAt, { playerId: "p1", bot: bot("Rivet") }, { playerId: "p2", bot: bot("Relay") });
+    const originalX = state.bots.host.x;
+    simulation.advanceOnlineMatch(
+      state,
+      startedAt + 1_000,
+      "buttons",
+      60,
+      actionIntervalMs,
+      { host: { forward: true, turn: 0 }, guest: { forward: false, turn: 0 } },
+    );
 
-  for (let tick = 1; tick <= 15; tick += 1) {
-    simulation.applyOnlineControlState(state, "host", { forward: true, turn: 1 });
-    simulation.advanceOnlineMatch(state, startedAt + Math.round(tick * 1000 / 30), "buttons", 60, 100);
+    assert.equal(state.bots.host.telemetry.actionCounts.forward, Math.floor(1_000 / actionIntervalMs) + 1, `${actionIntervalMs}ms tick count`);
+    assert.ok(state.bots.host.x > originalX, `${actionIntervalMs}ms held input should move smoothly between decisions`);
   }
+});
 
-  assert.ok(state.bots.host.x > originalX, "held forward input should move on every server tick");
-  assert.ok(state.bots.host.angle > 0, "held turn input should rotate smoothly");
-  assert.equal(state.simulatedAt, startedAt + 500);
+test("manual and live actions cannot bypass the configured game tick", () => {
+  const startedAt = 14_000;
+  const state = simulation.createOnlineMatch(startedAt, { playerId: "p1", bot: bot("Rivet") }, { playerId: "p2", bot: bot("Relay") });
+  const first = simulation.performOnlineActionDetailed(state, "host", "dash", undefined, 250, { sequence: 1 });
+  state.simulatedAt = startedAt + 249;
+  const early = simulation.performOnlineActionDetailed(state, "host", "skill", undefined, 250, { sequence: 2 });
+  state.simulatedAt = startedAt + 250;
+  const onTick = simulation.performOnlineActionDetailed(state, "host", "skill", undefined, 250, { sequence: 3 });
+  assert.equal(first.accepted, true);
+  assert.deepEqual({ accepted: early.accepted, reason: early.reason }, { accepted: false, reason: "interval" });
+  assert.equal(onTick.accepted, true);
 });
 
 test("rapid timed inputs are queued and acknowledged in order", () => {
@@ -63,6 +90,22 @@ test("rapid timed inputs are queued and acknowledged in order", () => {
   simulation.advanceOnlineMatch(state, startedAt + 450, "buttons", 60, 200);
   assert.equal(state.bots.host.pendingActions.length, 0);
   assert.equal(state.bots.host.telemetry.actionCounts.turnright, 1);
+});
+
+test("script agents decide exactly on preset and custom game ticks", () => {
+  const turningBot = (id) => ({ ...bot(id), scriptSource: "function decide(game) { return turnright(0.1); }" });
+  for (const actionIntervalMs of [100, 250, 500, 173]) {
+    const startedAt = 16_000;
+    const state = simulation.createOnlineMatch(
+      startedAt,
+      { playerId: "p1", bot: turningBot("Rivet") },
+      { playerId: "p2", bot: turningBot("Relay") },
+    );
+    simulation.advanceOnlineMatch(state, startedAt + 1_000, "script", 60, actionIntervalMs);
+    const expected = Math.floor(1_000 / actionIntervalMs) + 1;
+    assert.equal(state.bots.host.telemetry.actionCounts.turnright, expected, `${actionIntervalMs}ms host script count`);
+    assert.equal(state.bots.guest.telemetry.actionCounts.turnright, expected, `${actionIntervalMs}ms guest script count`);
+  }
 });
 
 test("script mode executes steering decisions and reports runtime errors", () => {

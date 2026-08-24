@@ -306,7 +306,7 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
     const timer = window.setInterval(() => {
       if (transportRef.current === "realtime") sendControlState();
       else held.forEach((action) => void sendAction(action, .3));
-    }, transportRef.current === "realtime" ? 100 : Math.max(100, room.actionIntervalMs));
+    }, Math.max(50, room.actionIntervalMs));
     return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); window.clearInterval(timer); held.clear(); sendControlState(); };
   }, [room?.actionIntervalMs, room?.controlMode, room?.status, sendAction, sendControlState, transport]);
 

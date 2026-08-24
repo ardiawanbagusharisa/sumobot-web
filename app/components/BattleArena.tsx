@@ -242,8 +242,13 @@ export function BattleArena({ mode, playerSkill, playerBotName, playerAppearance
   const beginRound = useCallback(() => {
     resetBots();
     scriptRuntimeRef.current?.reset();
-    startedAtRef.current = performance.now();
-    lastFrameRef.current = performance.now();
+    const startedAt = performance.now();
+    startedAtRef.current = startedAt;
+    lastFrameRef.current = startedAt;
+    nextEnemyDecisionRef.current = startedAt;
+    nextScriptDecisionRef.current = startedAt;
+    nextHeldActionAtRef.current = startedAt;
+    lastPlayerActionAtRef.current = Number.NEGATIVE_INFINITY;
     runningRef.current = true;
     setRunning(true);
     setTimeLeft(roundSeconds);
@@ -356,7 +361,7 @@ export function BattleArena({ mode, playerSkill, playerBotName, playerAppearance
     if (!runningRef.current) return false;
     const now = performance.now();
     const isTimedAction = action === "forward" || action === "turnleft" || action === "turnright";
-    if (side === "player" && isTimedAction && !bypassInterval && now - lastPlayerActionAtRef.current < actionIntervalMs) return false;
+    if (side === "player" && !bypassInterval && now - lastPlayerActionAtRef.current < actionIntervalMs) return false;
     const bot = side === "player" ? playerRef.current : enemyRef.current;
     const safeDuration = clampActionDuration(duration) * 1000;
 
@@ -391,8 +396,8 @@ export function BattleArena({ mode, playerSkill, playerBotName, playerAppearance
     targetTelemetry.actionCounts[actionKey] += 1;
     if (targetTelemetry.firstActions.length < 8) targetTelemetry.firstActions.push(action);
     if (side === "player") {
-      if (isTimedAction) lastPlayerActionAtRef.current = now;
-      const suffix = action === "forward" || action.startsWith("turn") ? `(${(safeDuration / 1000).toFixed(1)})` : "()";
+      lastPlayerActionAtRef.current = now;
+      const suffix = isTimedAction ? `(${(safeDuration / 1000).toFixed(1)})` : "()";
       setLastAction(`${action}${suffix}`);
     }
     return true;

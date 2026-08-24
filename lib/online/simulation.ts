@@ -149,8 +149,8 @@ export function performOnlineActionDetailed(
   const bot = state.bots[side];
   bot.pendingActions ??= [];
   const timed = action === "forward" || action === "turnleft" || action === "turnright";
-  if (timed && now - bot.lastActionAt < actionIntervalMs) {
-    if (!options.queueIfThrottled) return rejected("interval");
+  if (now - bot.lastActionAt < actionIntervalMs) {
+    if (!timed || !options.queueIfThrottled) return rejected("interval");
     if (bot.pendingActions.length >= 8) return rejected("queue_full");
     const previousExecuteAt = bot.pendingActions.at(-1)?.executeAt ?? bot.lastActionAt;
     const executeAt = Math.max(now, previousExecuteAt + actionIntervalMs);
@@ -178,7 +178,7 @@ export function performOnlineActionDetailed(
     if (bot.skill === "stone") { bot.vx = 0; bot.vy = 0; }
   }
 
-  if (timed) bot.lastActionAt = now;
+  bot.lastActionAt = now;
   bot.telemetry.actionCounts[action] += 1;
   if (bot.telemetry.firstActions.length < 8) bot.telemetry.firstActions.push(action);
   return accepted();
@@ -198,17 +198,30 @@ export function applyOnlineControlState(
   state: OnlineMatchState,
   side: RoomSide,
   input: { forward: boolean; turn: -1 | 0 | 1 },
+  actionIntervalMs: number,
 ) {
-  if (state.phase !== "live") return;
+  if (state.phase !== "live") return false;
   const bot = state.bots[side];
   const now = state.simulatedAt;
-  if (now < bot.stunnedUntil || (bot.skill === "stone" && now < bot.skillUntil)) return;
-  const holdUntil = now + 120;
-  if (input.forward) bot.thrustUntil = Math.max(bot.thrustUntil, holdUntil);
+  if (now < bot.nextDecisionAt) return false;
+  bot.nextDecisionAt = now + actionIntervalMs;
+  if (!input.forward) bot.thrustUntil = Math.min(bot.thrustUntil, now);
+  if (input.turn === 0) bot.turnUntil = Math.min(bot.turnUntil, now);
+  if (now < bot.stunnedUntil || (bot.skill === "stone" && now < bot.skillUntil)) return true;
+  const holdUntil = bot.nextDecisionAt;
+  if (input.forward) {
+    bot.thrustUntil = Math.max(bot.thrustUntil, holdUntil);
+    bot.telemetry.actionCounts.forward += 1;
+    if (bot.telemetry.firstActions.length < 8) bot.telemetry.firstActions.push("forward");
+  }
   if (input.turn !== 0) {
     bot.turnDirection = input.turn;
     bot.turnUntil = Math.max(bot.turnUntil, holdUntil);
+    const action = input.turn < 0 ? "turnleft" : "turnright";
+    bot.telemetry.actionCounts[action] += 1;
+    if (bot.telemetry.firstActions.length < 8) bot.telemetry.firstActions.push(action);
   }
+  return true;
 }
 
 type OnlineScriptRuntime = ReturnType<typeof createScriptRuntime>;
@@ -388,16 +401,22 @@ function finishRound(state: OnlineMatchState, winner: RoomSide | "draw", reason:
   state.roundBreakUntil = state.simulatedAt + 1700;
 }
 
-export function advanceOnlineMatch(state: OnlineMatchState, targetNow: number, controlMode: string, roundSeconds: number, actionIntervalMs: number) {
+type OnlineControlStates = Partial<Record<RoomSide, { forward: boolean; turn: -1 | 0 | 1 }>>;
+
+export function advanceOnlineMatch(
+  state: OnlineMatchState,
+  targetNow: number,
+  controlMode: string,
+  roundSeconds: number,
+  actionIntervalMs: number,
+  controls?: OnlineControlStates,
+) {
   const cappedTarget = Math.min(targetNow, state.simulatedAt + MAX_ADVANCE_MS);
   const scriptRuntimes = controlMode === "script" ? {
     host: prepareScriptRuntime(state.bots.host),
     guest: prepareScriptRuntime(state.bots.guest),
   } : null;
-  while (state.simulatedAt < cappedTarget && state.phase !== "complete") {
-    const previousSimulatedAt = state.simulatedAt;
-    state.simulatedAt = Math.min(cappedTarget, state.simulatedAt + STEP_MS);
-    const deltaSeconds = (state.simulatedAt - previousSimulatedAt) / 1000;
+  while (state.phase !== "complete") {
     if (state.phase === "round-break") {
       if (state.roundBreakUntil && state.simulatedAt >= state.roundBreakUntil) {
         state.round += 1;
@@ -406,15 +425,37 @@ export function advanceOnlineMatch(state: OnlineMatchState, targetNow: number, c
         state.roundBreakUntil = null;
         resetBot(state.bots.host, "host", state.simulatedAt);
         resetBot(state.bots.guest, "guest", state.simulatedAt);
+        continue;
       }
+      if (state.simulatedAt >= cappedTarget) break;
+      state.simulatedAt = Math.min(cappedTarget, state.simulatedAt + STEP_MS, state.roundBreakUntil ?? Number.POSITIVE_INFINITY);
       continue;
     }
+
     drainQueuedActions(state, "host", actionIntervalMs);
     drainQueuedActions(state, "guest", actionIntervalMs);
     if (controlMode === "script") {
       scriptDecision(state, "host", actionIntervalMs, scriptRuntimes?.host ?? null);
       scriptDecision(state, "guest", actionIntervalMs, scriptRuntimes?.guest ?? null);
+    } else if (controlMode === "buttons" && controls) {
+      for (const side of ["host", "guest"] as const) {
+        const input = controls[side];
+        if (input) applyOnlineControlState(state, side, input, actionIntervalMs);
+      }
     }
+    if (state.simulatedAt >= cappedTarget) break;
+
+    const eventDeadlines = [
+      state.simulatedAt + STEP_MS,
+      cappedTarget,
+      state.bots.host.pendingActions[0]?.executeAt ?? Number.POSITIVE_INFINITY,
+      state.bots.guest.pendingActions[0]?.executeAt ?? Number.POSITIVE_INFINITY,
+      controlMode === "script" || (controlMode === "buttons" && controls) ? state.bots.host.nextDecisionAt : Number.POSITIVE_INFINITY,
+      controlMode === "script" || (controlMode === "buttons" && controls) ? state.bots.guest.nextDecisionAt : Number.POSITIVE_INFINITY,
+    ];
+    const previousSimulatedAt = state.simulatedAt;
+    state.simulatedAt = Math.min(...eventDeadlines.filter((deadline) => deadline > previousSimulatedAt));
+    const deltaSeconds = (state.simulatedAt - previousSimulatedAt) / 1000;
     updateBot(state.bots.host, deltaSeconds, state.simulatedAt);
     updateBot(state.bots.guest, deltaSeconds, state.simulatedAt);
     resolveCollision(state);

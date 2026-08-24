@@ -9,7 +9,7 @@ import {
   type RealtimeServerMessage,
   type RealtimeTicketClaims,
 } from "../lib/online/realtime-protocol";
-import { advanceOnlineMatch, applyOnlineControlState, forfeitOnlineMatch, performOnlineActionDetailed } from "../lib/online/simulation";
+import { advanceOnlineMatch, forfeitOnlineMatch, performOnlineActionDetailed } from "../lib/online/simulation";
 import type { OnlineMatchState, RoomSide } from "../lib/online/types";
 
 interface RealtimeDurableObjectNamespace {
@@ -177,9 +177,6 @@ export class MatchRoom {
   private async tick() {
     if (!this.stored || this.stored.match.phase === "complete") return;
     const now = Date.now();
-    for (const side of ["host", "guest"] as const) {
-      applyOnlineControlState(this.stored.match, side, this.controls[side]);
-    }
     const hostGone = this.disconnectedAt.host && now - this.disconnectedAt.host >= REALTIME_DISCONNECT_GRACE_MS;
     const guestGone = this.disconnectedAt.guest && now - this.disconnectedAt.guest >= REALTIME_DISCONNECT_GRACE_MS;
     if (hostGone || guestGone) {
@@ -189,7 +186,7 @@ export class MatchRoom {
         this.stored.match.reason = "disconnect";
       } else forfeitOnlineMatch(this.stored.match, hostGone ? "guest" : "host");
     } else {
-      advanceOnlineMatch(this.stored.match, now, this.stored.bootstrap.controlMode, this.stored.bootstrap.roundSeconds, this.stored.bootstrap.actionIntervalMs);
+      advanceOnlineMatch(this.stored.match, now, this.stored.bootstrap.controlMode, this.stored.bootstrap.roundSeconds, this.stored.bootstrap.actionIntervalMs, this.controls);
       this.stored.serverTick += 1;
     }
     if (this.stored.match.phase === "complete") return void await this.finish();
