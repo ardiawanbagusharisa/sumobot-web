@@ -3,8 +3,11 @@ import { useCallback, useMemo, useRef, useState, useEffect, type CSSProperties, 
 import { BattleArena, type BattleReplayData, type BattleTelemetry } from "./BattleArena";
 import { BattleReplay } from "./BattleReplay";
 import { BotVisual, type BotAppearance } from "./BotVisual";
-import { campaignChapters, marketItems } from "@/lib/game/prototype-data";
+import { marketItems } from "@/lib/game/prototype-data";
 import { FSM_SCRIPT, MATCH_REWARDS, normalizeActionIntervalMs, PRIMITIVE_SCRIPT, RANK_POINTS, STARTER_SCRIPT, type ControlMode, type MatchResult, type SkillType } from "@/lib/game/rules";
+import type { CampaignAttempt, CampaignLevel, CampaignLevelProgress } from "@/lib/game/campaign";
+import { CampaignCenter } from "./CampaignCenter";
+import { CampaignMission } from "./CampaignMission";
 import { migrateLegacyJsonScript, parseBotScript } from "@/lib/game/script-runtime";
 import { HOME_DEMO_META, HOME_DEMO_REPLAY } from "@/lib/game/demo-replay";
 import { OnlineRoomBrowser } from "./OnlineRooms";
@@ -43,6 +46,7 @@ interface BattleLog {
     playedAt: string;
     telemetry: BattleTelemetry;
     replay?: BattleReplayData;
+    campaign?: boolean;
 }
 interface LocalPlayer {
     id: string;
@@ -75,6 +79,8 @@ interface SavedProfile {
     gold: number;
     xp: number;
     campaignCompleted: boolean;
+    campaignProgress: Record<string, CampaignLevelProgress>;
+    campaignLicenses: string[];
 }
 const navItems: Array<{
     id: View;
@@ -179,6 +185,9 @@ export function SumobotApp() {
     const [xp, setXp] = useState(320);
     const [owned, setOwned] = useState<CosmeticId[]>(["body-citrus", "face-happy"]);
     const [campaignCompleted, setCampaignCompleted] = useState(false);
+    const [campaignProgress, setCampaignProgress] = useState<Record<string, CampaignLevelProgress>>({});
+    const [campaignLicenses, setCampaignLicenses] = useState<string[]>([]);
+    const [campaignLevel, setCampaignLevel] = useState<CampaignLevel | null>(null);
     const [toast, setToast] = useState<string | null>(null);
     const [selectedScriptId, setSelectedScriptId] = useState("primitive");
     const [scriptName, setScriptName] = useState("Primitive Rules");
@@ -230,7 +239,7 @@ export function SumobotApp() {
                 .map((record) => ({ ...record, mode: "script" as const, battleType: "pvai" as const, botId: "legacy", scriptId, replay: undefined })));
             const mergedHistory: BattleLog[] = [...recovered, ...storedHistory].slice(-50);
             setBattleHistory(mergedHistory);
-            const replayable = mergedHistory.filter((entry) => entry.replay?.frames.length);
+            const replayable = mergedHistory.filter((entry) => entry.campaign === false && (entry.battleType === "pvai" || entry.battleType === "pvp") && entry.replay?.frames.length);
             setHomeReplayLogId(replayable.length ? replayable[Math.floor(Math.random() * replayable.length)].id : null);
         }
         if (saved.owned)
@@ -240,6 +249,8 @@ export function SumobotApp() {
         if (typeof saved.xp === "number")
             setXp(saved.xp);
         setCampaignCompleted(Boolean(saved.campaignCompleted));
+        setCampaignProgress(saved.campaignProgress ?? {});
+        setCampaignLicenses(saved.campaignLicenses ?? []);
     };
     const resetLocalProfile = () => {
         setBots(initialBots);
@@ -257,6 +268,9 @@ export function SumobotApp() {
         setXp(320);
         setOwned(["body-citrus", "face-happy"]);
         setCampaignCompleted(false);
+        setCampaignProgress({});
+        setCampaignLicenses([]);
+        setCampaignLevel(null);
         setSelectedScriptId("primitive");
         setScriptName("Primitive Rules");
         setScriptDraft(STARTER_SCRIPT);
@@ -323,7 +337,7 @@ export function SumobotApp() {
     useEffect(() => {
         if (!player)
             return;
-        const saved: SavedProfile = { bots, scripts, analytics, battleHistory, owned, gold, xp, campaignCompleted };
+        const saved: SavedProfile = { bots, scripts, analytics, battleHistory, owned, gold, xp, campaignCompleted, campaignProgress, campaignLicenses };
         window.localStorage.setItem(`sumobot-profile:${player.handle}`, JSON.stringify(saved));
         if (!profileLoaded) return;
         const serialized = JSON.stringify(saved);
@@ -343,7 +357,7 @@ export function SumobotApp() {
             }).catch(() => undefined);
         }, 700);
         return () => window.clearTimeout(timer);
-    }, [analytics, applyProfileEnvelope, battleHistory, bots, campaignCompleted, gold, owned, player, profileLoaded, scripts, xp]);
+    }, [analytics, applyProfileEnvelope, battleHistory, bots, campaignCompleted, campaignLicenses, campaignProgress, gold, owned, player, profileLoaded, scripts, xp]);
     const protectedViews: View[] = ["play", "campaign", "hangar", "market", "lab"];
     const navigate = (next: View) => {
         if (!player && protectedViews.includes(next)) {
@@ -354,6 +368,8 @@ export function SumobotApp() {
         }
         if (next !== "play")
             setBattleActive(false);
+        if (next !== "campaign")
+            setCampaignLevel(null);
         setView(next);
         window.scrollTo({ top: 0, behavior: "smooth" });
     };
@@ -523,7 +539,35 @@ export function SumobotApp() {
         }
         setScriptStatus("Applied from the Lab training match");
     };
-    const startCampaignBattle = (nextMode: ControlMode) => { setMode(nextMode); setPracticeBattle(false); setCampaignBattle(true); setBattleActive(true); setView("play"); };
+    const recordCampaignAttempt = (level: CampaignLevel, attempt: CampaignAttempt) => {
+        const previous = campaignProgress[level.id];
+        const localProgress: CampaignLevelProgress = {
+            levelId: level.id,
+            status: attempt.completed ? (attempt.stars >= 3 ? "mastered" : "completed") : "active",
+            attempts: (previous?.attempts ?? 0) + 1,
+            bestStars: Math.max(previous?.bestStars ?? 0, attempt.stars) as 0 | 1 | 2 | 3,
+            bestScore: Math.max(previous?.bestScore ?? 0, attempt.score),
+            firstAttemptSeconds: previous?.firstAttemptSeconds ?? attempt.durationSeconds,
+            bestAttemptSeconds: previous?.bestAttemptSeconds ? Math.min(previous.bestAttemptSeconds, attempt.durationSeconds) : attempt.durationSeconds,
+            bestCollisions: previous?.bestCollisions === undefined ? attempt.collisions : Math.min(previous.bestCollisions, attempt.collisions),
+            bestActions: previous?.bestActions === undefined ? attempt.actions : Math.min(previous.bestActions, attempt.actions),
+            hintsViewed: Math.max(previous?.hintsViewed ?? 0, attempt.hintsViewed),
+            lastCode: attempt.code ?? previous?.lastCode,
+            completedAt: attempt.completed ? previous?.completedAt ?? new Date().toISOString() : previous?.completedAt,
+            rewardsClaimed: previous?.rewardsClaimed ?? false,
+        };
+        setCampaignProgress((current) => ({ ...current, [level.id]: localProgress }));
+        if (!attempt.completed) { showToast("Training attempt recorded. Review the evidence and try again."); return; }
+        void fetch("/api/profile", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "campaign_level", levelId: level.id, attempt }) })
+            .then(async (response) => {
+                const payload = await response.json() as { profile?: SavedProfile; revision?: number; reward?: { xp: number; gold: number }; license?: { rank: string; badge: string }; error?: string };
+                if (!response.ok || !payload.profile || typeof payload.revision !== "number") throw new Error(payload.error ?? "Reward claim failed");
+                applyProfileEnvelope({ profile: payload.profile, revision: payload.revision });
+                const reward = payload.reward ?? { xp: 0, gold: 0 };
+                showToast(payload.license ? `${payload.license.rank} license earned · ${payload.license.badge} unlocked!` : `Mission complete · +${reward.xp} XP and +${reward.gold} gold.`);
+            })
+            .catch(() => showToast("Mission saved on this device; online rewards are waiting to be claimed."));
+    };
     const finishBattle = (result: MatchResult, telemetry: BattleTelemetry, replay: BattleReplayData) => {
         if (practiceBattle) {
             setBattleActive(false);
@@ -539,13 +583,15 @@ export function SumobotApp() {
             setCampaignCompleted(true);
         const logId = `match-${Date.now()}`;
         const playedAt = new Date().toLocaleString();
-        const publicRecord: PublicFeaturedReplay = { replay, result, playedAt };
+        const publicRecord: PublicFeaturedReplay | null = campaignBattle ? null : { replay, result, playedAt };
         setBattleHistory((current) => {
-            const next = [...current, { id: logId, result, mode, battleType, botId: battleBot.id, scriptId: mode === "script" ? battleBot.scriptId : null, playedAt, telemetry, replay }].slice(-50);
+            const next = [...current, { id: logId, result, mode, battleType, botId: battleBot.id, scriptId: mode === "script" ? battleBot.scriptId : null, playedAt, telemetry, replay, campaign: campaignBattle }].slice(-50);
             return next.map((entry, index) => index < next.length - 12 && entry.replay ? { ...entry, replay: undefined } : entry);
         });
-        setHomeReplayLogId(logId);
-        setPublicFeaturedReplay(publicRecord);
+        if (publicRecord) {
+            setHomeReplayLogId(logId);
+            setPublicFeaturedReplay(publicRecord);
+        }
         void fetch("/api/matches", {
             method: "POST",
             credentials: "same-origin",
@@ -583,7 +629,7 @@ export function SumobotApp() {
     }, {}), [battleHistory]);
     const activeApiSection = SCRIPT_API_SECTIONS.find((section) => section.id === apiSection) ?? SCRIPT_API_SECTIONS[0];
     const replayLog = battleHistory.find((entry) => entry.id === replayLogId && entry.replay) ?? null;
-    const homeReplayCandidates = useMemo(() => player ? battleHistory.filter((entry) => entry.replay?.frames.length) : [], [battleHistory, player]);
+    const homeReplayCandidates = useMemo(() => player ? battleHistory.filter((entry) => entry.campaign === false && (entry.battleType === "pvai" || entry.battleType === "pvp") && entry.replay?.frames.length) : [], [battleHistory, player]);
     const selectedHomeReplay = homeReplayCandidates.find((entry) => entry.id === homeReplayLogId) ?? null;
     const homeReplay = publicFeaturedReplay?.replay ?? selectedHomeReplay?.replay ?? HOME_DEMO_REPLAY;
     const homeReplayResult = publicFeaturedReplay?.result ?? selectedHomeReplay?.result ?? HOME_DEMO_META.result;
@@ -746,7 +792,7 @@ export function SumobotApp() {
       <span className="config-bot-visual"><BotVisual name={bot.name} skill={bot.skill} appearance={appearanceFor(bot)} variant="compact"/></span>
       <strong>{bot.name}</strong><small className={`config-script-label ${bot.scriptId ? "attached" : "empty"}`}>{scripts.find((item) => item.id === bot.scriptId)?.name ?? "No script"}</small><span className={`config-skill-badge ${bot.skill}`}><i>{bot.skill === "boost" ? "B" : "S"}</i><span><strong>{bot.skill === "boost" ? "BOOST" : "STONE"}</strong><small>{bot.skill === "boost" ? "Speed ×1.5" : "Reflect ×2"}</small></span></span></button>)}</div></div><div className="config-group"><span>2. INPUT MODE</span><div className="config-options">{(Object.keys(modeCopy) as ControlMode[]).map((id) => <button type="button" key={id} className={mode === id ? "active" : ""} onClick={() => setMode(id)}><strong>{modeCopy[id].title}</strong><small>{modeCopy[id].description}</small></button>)}</div></div><div className="config-split"><div className="config-group"><span>3. ROUND TIMER</span><div className="segmented-control">{[30, 60, 120].map((value) => <button type="button" key={value} className={roundSeconds === value ? "active" : ""} onClick={() => { setRoundSeconds(value); }}>{value}s</button>)}</div></div><div className="config-group"><span>4. GAME TICK</span><div className="tick-control"><div className="segmented-control">{[100, 250, 500].map((value) => <button type="button" key={value} className={actionIntervalMs === value ? "active" : ""} onClick={() => { setActionIntervalMs(value); setCustomTick(String(value)); }}>{value}ms</button>)}</div><label><span>CUSTOM</span><input type="number" min="50" max="3000" step="10" value={customTick} onChange={(event) => setCustomTick(event.target.value)} onBlur={applyCustomTick} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} aria-label="Custom game tick in milliseconds"/><small>ms</small></label></div></div></div>{mode === "script" && <div className={`attached-script-notice ${battleBot.scriptId ? "ready" : "missing"}`}><strong>{battleBot.scriptId ? `Attached: ${attachedScript.name}` : "No script attached"}</strong><span>{battleBot.scriptId ? "The authoritative server executes the attached script for online matches." : "Open Hangar and attach a saved Lab script before starting Script Pilot."}</span></div>}{battleType === "pvai" && <button className="button button-primary battle-launch" type="button" onClick={() => startBattle(false)}>START BATTLE &gt;</button>}</div>{battleType === "pvp" && <OnlineRoomBrowser bots={onlineBots} selectedBotId={battleBot.id} mode={mode} roundSeconds={roundSeconds} actionIntervalMs={actionIntervalMs} onJoined={(roomId, roomMode) => { setMode(roomMode); setOnlineRoomId(roomId); setBattleType("pvp"); setBattleActive(true); }} />}</>}</section>}
 
-    {view === "campaign" && <section className="content-page page-width"><div className="page-intro campaign-intro"><div><span className="eyebrow">Training pathway</span><h1>From pilot to programmer.</h1><p>Campaign battles use your currently selected bot; input mode is chosen by the lesson.</p></div><div className="campaign-total"><strong>{campaignCompleted ? "25%" : "18%"}</strong><span>CAMPAIGN COMPLETE</span></div></div><div className="campaign-path">{campaignChapters.map((chapter, index) => { const unlocked = index === 0 || (index === 1 && campaignCompleted); const completed = index === 0 && campaignCompleted; return <article key={chapter.number} className={`chapter-card ${completed ? "completed" : unlocked ? "active" : "locked"}`}><div className="chapter-index">{chapter.number}</div><div className="chapter-body"><span className="eyebrow">{chapter.mode}</span><h2>{chapter.title}</h2><p>{chapter.description}</p><div className="lesson-list">{chapter.lessons.map((lesson, lessonIndex) => <span key={lesson} className={(completed || (index === 0 && lessonIndex < 3)) ? "done" : ""}><i>{lessonIndex + 1}</i>{lesson}</span>)}</div><div className="chapter-footer"><span>{chapter.reward}</span>{unlocked ? <button type="button" onClick={() => startCampaignBattle(index === 0 ? "buttons" : "live")}>{completed ? "Replay battle" : "Start lesson battle ->"}</button> : <strong>Locked</strong>}</div></div>{index < campaignChapters.length - 1 && <div className="path-line"/>}</article>; })}</div></section>}
+    {view === "campaign" && (campaignLevel ? <CampaignMission key={campaignLevel.id} level={campaignLevel} botName={battleBot.name} botSkill={battleBot.skill} botAppearance={appearanceFor(battleBot)} savedScript={campaignProgress[campaignLevel.id]?.lastCode ?? attachedScript.source} previousBest={campaignProgress[campaignLevel.id] ? { stars: campaignProgress[campaignLevel.id].bestStars, seconds: campaignProgress[campaignLevel.id].bestAttemptSeconds, collisions: campaignProgress[campaignLevel.id].bestCollisions } : undefined} onExit={() => setCampaignLevel(null)} onFinish={(attempt) => recordCampaignAttempt(campaignLevel, attempt)} /> : <CampaignCenter progress={campaignProgress} claimedLicenses={campaignLicenses} onStart={(level) => { setCampaignLevel(level); window.scrollTo({ top: 0, behavior: "smooth" }); }} />)}
 
     {view === "hangar" && hangarBot && <section className="content-page page-width"><div className="page-intro"><div><span className="eyebrow">Bots & owned inventory</span><h1>Build Sumo Bot.</h1><p>Customize your bot appearance, skill, and script.</p></div><button className="button button-primary" type="button" onClick={createBot} disabled={bots.length >= 3}>Create Bot</button></div><div className="bot-roster">{bots.map((bot) => <button type="button" key={bot.id} className={hangarBot.id === bot.id ? "active" : ""} onClick={() => selectHangarBot(bot.id)}><span>{bot.name.slice(0, 1).toUpperCase()}</span><strong>{bot.name}</strong><small>{scripts.find((item) => item.id === bot.scriptId)?.name ?? "No script"}</small></button>)}</div><div className="hangar-layout"><div className="hangar-stage"><div className="stage-ring"/><BotVisual name={hangarBot.name} skill={hangarBot.skill} appearance={appearanceFor(hangarBot)}/><div className="hangar-caption"><h2>{hangarBot.name.toUpperCase()}</h2><p>{scripts.find((item) => item.id === hangarBot.scriptId)?.name ?? "No script attached"} | {hangarBot.skill} skill</p></div></div><div className="loadout-panel"><div className="bot-profile-fields"><label><span>BOT NAME</span><input value={hangarBot.name} maxLength={24} onChange={(event) => updateBot(hangarBot.id, { name: event.target.value || "Unnamed Bot" })}/></label><button className="delete-bot" type="button" onClick={() => deleteBot(hangarBot.id)} disabled={bots.length <= 1}>Delete</button></div><span className="eyebrow">Owned cosmetic inventory</span>{(["wheel", "body", "face", "accessory"] as CosmeticSlot[]).map((slot) => <div className="inventory-slot" key={slot}><div><small>{slot.toUpperCase()}</small><strong>{marketItems.find((item) => item.id === hangarBot.loadout[slot])?.name ?? `Standard ${slot}`}</strong></div><div className="inventory-options"><button className={hangarBot.loadout[slot] === null ? "active" : ""} type="button" onClick={() => clearSlot(slot)}>Default</button>{marketItems.filter((item) => item.slot === slot && owned.includes(item.id)).map((item) => <button type="button" key={item.id} className={hangarBot.loadout[slot] === item.id ? "active" : ""} style={{ "--swatch": item.color } as CSSProperties} onClick={() => equipItem(item.id)}>{item.name}</button>)}</div></div>)}<div className="script-inventory"><label><span className="eyebrow">Saved script</span><select value={hangarBot.scriptId ?? ""} onChange={(event) => { if (event.target.value === "__new__") navigate("lab"); else updateBot(hangarBot.id, { scriptId: event.target.value || null }); }}><option value="">No attached script</option>{scripts.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}<option value="__new__">+ Add New Script</option></select></label></div><div className="loadout-skill"><span><small>SPECIAL SKILL</small><strong>{hangarBot.skill === "boost" ? "Boost Drive" : "Stone Guard"}</strong></span><button type="button" onClick={() => updateBot(hangarBot.id, { skill: hangarBot.skill === "boost" ? "stone" : "boost" })}>Switch skill</button></div></div></div>{hangarInsightsPanel}</section>}
 

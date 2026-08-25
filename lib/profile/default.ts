@@ -9,6 +9,8 @@ export interface StoredProfile {
   gold: number;
   xp: number;
   campaignCompleted: boolean;
+  campaignProgress: Record<string, Record<string, unknown>>;
+  campaignLicenses: string[];
 }
 
 export function defaultOnlineProfile(): StoredProfile {
@@ -27,5 +29,7 @@ export function defaultOnlineProfile(): StoredProfile {
     gold: 480,
     xp: 320,
     campaignCompleted: false,
+    campaignProgress: {},
+    campaignLicenses: [],
   };
 }

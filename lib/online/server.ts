@@ -549,6 +549,7 @@ async function finalizeOnlineRoom(row: RoomRow) {
       playedAt: now,
       telemetry: match?.bots[participant.side].telemetry ?? {},
       replay,
+      campaign: false,
     };
     const next = {
       ...current.profile,
@@ -566,8 +567,8 @@ async function finalizeOnlineRoom(row: RoomRow) {
         WHERE id = ? AND NOT EXISTS (SELECT 1 FROM online_reward_claims WHERE room_id = ? AND player_id = ?)`)
         .bind(rule.rewards.xp, rule.rewards.gold, now, participant.id, row.id, participant.id),
       d1.prepare(`INSERT OR IGNORE INTO prototype_match_records
-        (id, player_id, player_handle, bot_id, bot_name, control_mode, battle_mode, result, rank_points, telemetry, replay, played_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'pvp', ?, ?, ?, ?, ?)`)
+        (id, player_id, player_handle, bot_id, bot_name, control_mode, battle_mode, result, rank_points, telemetry, replay, campaign, played_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'pvp', ?, ?, ?, ?, 0, ?)`)
         .bind(matchId, participant.id, participant.player.handle, participant.player.bot.id, participant.player.bot.name, row.controlMode, result, rule.rankPoints, JSON.stringify(match?.bots[participant.side].telemetry ?? {}), JSON.stringify(replay ?? {}), now),
       d1.prepare("INSERT OR IGNORE INTO online_reward_claims (id, room_id, player_id, result, created_at) VALUES (?, ?, ?, ?, ?)")
         .bind(claimId, row.id, participant.id, result, now),

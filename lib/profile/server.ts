@@ -2,6 +2,7 @@ import { getDatabase } from "@/lib/db/server";
 import { ensureAuthSchema, type AuthUser } from "@/lib/auth/server";
 import { marketItems } from "@/lib/game/prototype-data";
 import { PRIMITIVE_SCRIPT } from "@/lib/game/rules";
+import { campaignChapters, campaignLevels, levelsForChapter, type CampaignAttempt } from "@/lib/game/campaign";
 import { defaultOnlineProfile, type StoredProfile } from "@/lib/profile/default";
 
 
@@ -26,6 +27,37 @@ export async function ensureProfileSchema() {
 
 function boundedArray(value: unknown, maximum: number) {
   return Array.isArray(value) ? value.filter((item) => item && typeof item === "object").slice(-maximum) as Array<Record<string, unknown>> : [];
+}
+
+function normalizeCampaignProgress(value: unknown, preserve?: StoredProfile["campaignProgress"]) {
+  const input = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const validIds = new Set(campaignLevels.map((level) => level.id));
+  return Object.fromEntries(Object.entries(input).filter(([id, item]) => validIds.has(id) && item && typeof item === "object").map(([id, item]) => {
+    const entry = item as Record<string, unknown>;
+    const previous = preserve?.[id] ?? {};
+    const stars = Math.max(0, Math.min(3, Math.floor(Number(entry.bestStars ?? previous.bestStars ?? 0))));
+    const status = stars >= 3 ? "mastered" : stars >= 1 ? "completed" : entry.status === "active" ? "active" : "available";
+    return [id, {
+      levelId: id,
+      status,
+      attempts: Math.max(0, Math.min(10_000, Math.floor(Number(entry.attempts ?? previous.attempts ?? 0)))),
+      bestStars: stars,
+      bestScore: Math.max(0, Number(entry.bestScore ?? previous.bestScore ?? 0)),
+      firstAttemptSeconds: Number(entry.firstAttemptSeconds ?? previous.firstAttemptSeconds) || undefined,
+      bestAttemptSeconds: Number(entry.bestAttemptSeconds ?? previous.bestAttemptSeconds) || undefined,
+      bestCollisions: Number(entry.bestCollisions ?? previous.bestCollisions) || 0,
+      bestActions: Number(entry.bestActions ?? previous.bestActions) || 0,
+      hintsViewed: Math.max(0, Math.min(10, Math.floor(Number(entry.hintsViewed ?? previous.hintsViewed ?? 0)))),
+      lastCode: typeof entry.lastCode === "string" ? entry.lastCode.slice(0, 40_000) : previous.lastCode,
+      completedAt: typeof entry.completedAt === "string" ? entry.completedAt.slice(0, 80) : previous.completedAt,
+      rewardsClaimed: Boolean(previous.rewardsClaimed || entry.rewardsClaimed),
+    }];
+  }));
+}
+
+function normalizedLicenses(value: unknown, preserve?: string[]) {
+  const valid = new Set(campaignChapters.map((chapter) => String(chapter.number)));
+  return Array.from(new Set([...(preserve ?? []), ...(Array.isArray(value) ? value : [])].filter((item): item is string => typeof item === "string" && valid.has(item))));
 }
 
 function normalizeProfile(value: unknown, economy?: { gold: number; xp: number }, preserve?: StoredProfile): StoredProfile {
@@ -61,7 +93,9 @@ function normalizeProfile(value: unknown, economy?: { gold: number; xp: number }
     owned,
     gold: Math.max(0, Math.floor(economy?.gold ?? preserve?.gold ?? Number(input.gold ?? fallback.gold))),
     xp: Math.max(0, Math.floor(economy?.xp ?? preserve?.xp ?? Number(input.xp ?? fallback.xp))),
-    campaignCompleted: preserve?.campaignCompleted ?? Boolean(input.campaignCompleted),
+    campaignCompleted: Boolean(preserve?.campaignCompleted || input.campaignCompleted),
+    campaignProgress: normalizeCampaignProgress(input.campaignProgress, preserve?.campaignProgress),
+    campaignLicenses: normalizedLicenses(input.campaignLicenses, preserve?.campaignLicenses),
   };
 }
 
@@ -118,6 +152,64 @@ export async function purchaseMarketItem(user: AuthUser, itemId: string) {
   if (!(result as { meta?: { changes?: number } }).meta?.changes) return { error: "Profile changed; try again.", status: 409 as const };
   await d1.prepare("UPDATE players SET gold_balance = ?, updated_at = ? WHERE id = ?").bind(next.gold, now, user.id).run();
   return { profile: next, revision: current.revision + 1, alreadyOwned: false };
+}
+
+export async function claimCampaignLevel(user: AuthUser, levelId: string, attemptValue: unknown) {
+  const level = campaignLevels.find((entry) => entry.id === levelId);
+  if (!level) return { error: "Unknown campaign mission.", status: 404 as const };
+  const attempt = attemptValue && typeof attemptValue === "object" ? attemptValue as Partial<CampaignAttempt> : {};
+  if (!attempt.completed || Number(attempt.stars) < 1) return { error: "The mission objective was not completed.", status: 400 as const };
+  const current = await getOnlineProfile(user.id) ?? await importOnlineProfile(user, null);
+  const previous = current.profile.campaignProgress[level.id] ?? {};
+  const previousStars = Math.max(0, Number(previous.bestStars ?? 0));
+  const stars = Math.max(1, Math.min(3, Math.floor(Number(attempt.stars ?? 1))));
+  const duration = Math.max(0.1, Math.min(level.durationSeconds, Number(attempt.durationSeconds ?? level.durationSeconds)));
+  const collisions = Math.max(0, Math.floor(Number(attempt.collisions ?? 0)));
+  const actions = Math.max(0, Math.floor(Number(attempt.actions ?? 0)));
+  const firstReward = !previous.rewardsClaimed;
+  const nextProgress: StoredProfile["campaignProgress"] = {
+    ...current.profile.campaignProgress,
+    [level.id]: {
+      ...previous,
+      levelId: level.id,
+      status: Math.max(previousStars, stars) >= 3 ? "mastered" : "completed",
+      attempts: Math.max(1, Number(previous.attempts ?? 0) + 1),
+      bestStars: Math.max(previousStars, stars),
+      bestScore: Math.max(Number(previous.bestScore ?? 0), Number(attempt.score ?? 0)),
+      firstAttemptSeconds: Number(previous.firstAttemptSeconds ?? duration),
+      bestAttemptSeconds: Math.min(Number(previous.bestAttemptSeconds ?? duration), duration),
+      bestCollisions: Math.min(Number(previous.bestCollisions ?? collisions), collisions),
+      bestActions: Math.min(Number(previous.bestActions ?? actions), actions),
+      hintsViewed: Math.max(Number(previous.hintsViewed ?? 0), Number(attempt.hintsViewed ?? 0)),
+      lastCode: typeof attempt.code === "string" ? attempt.code.slice(0, 40_000) : previous.lastCode,
+      completedAt: typeof previous.completedAt === "string" ? previous.completedAt : new Date().toISOString(),
+      rewardsClaimed: true,
+    },
+  };
+  const chapterKey = String(level.chapter);
+  const chapterCompleted = levelsForChapter(level.chapter).every((entry) => Number(nextProgress[entry.id]?.bestStars ?? 0) >= 1);
+  const firstLicense = chapterCompleted && !current.profile.campaignLicenses.includes(chapterKey);
+  const chapter = campaignChapters[level.chapter - 1];
+  const reward = {
+    xp: (firstReward ? level.reward.xp : 0) + (firstLicense ? chapter.bonus.xp : 0),
+    gold: (firstReward ? level.reward.gold : 0) + (firstLicense ? chapter.bonus.gold : 0),
+  };
+  const licenses = firstLicense ? [...current.profile.campaignLicenses, chapterKey] : current.profile.campaignLicenses;
+  const next: StoredProfile = {
+    ...current.profile,
+    campaignProgress: nextProgress,
+    campaignLicenses: licenses,
+    campaignCompleted: campaignLevels.every((entry) => Number(nextProgress[entry.id]?.bestStars ?? 0) >= 1),
+    xp: current.profile.xp + reward.xp,
+    gold: current.profile.gold + reward.gold,
+  };
+  const now = new Date().toISOString();
+  const d1 = await getDatabase();
+  const result = await d1.prepare("UPDATE online_profiles SET profile = ?, revision = revision + 1, updated_at = ? WHERE player_id = ? AND revision = ?")
+    .bind(JSON.stringify(next), now, user.id, current.revision).run();
+  if (!(result as { meta?: { changes?: number } }).meta?.changes) return { error: "Profile changed; run the claim again.", status: 409 as const };
+  await d1.prepare("UPDATE players SET total_xp = ?, gold_balance = ?, updated_at = ? WHERE id = ?").bind(next.xp, next.gold, now, user.id).run();
+  return { profile: next, revision: current.revision + 1, reward, firstReward, license: firstLicense ? chapter : null };
 }
 
 export async function applyProfileReward(playerId: string, result: "win" | "draw" | "loss", reward: { xp: number; gold: number }, historyEntry?: Record<string, unknown>) {
