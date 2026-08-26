@@ -10,7 +10,7 @@
     "build": "vinext build",
     "start": "vinext start",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs tests/script-runtime.test.mjs tests/online-simulation.test.mjs tests/online-polling.test.mjs tests/profile-initialization.test.mjs tests/realtime-auth.test.mjs tests/campaign-curriculum.test.mjs",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs tests/script-runtime.test.mjs tests/online-simulation.test.mjs tests/online-polling.test.mjs tests/profile-initialization.test.mjs tests/realtime-auth.test.mjs tests/campaign-curriculum.test.mjs tests/product-plan.test.mjs",
     "realtime:build": "wrangler deploy --dry-run -c wrangler.realtime.jsonc --outdir .wrangler/realtime-build",
     "realtime:deploy": "wrangler deploy -c wrangler.realtime.jsonc",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .wrangler",

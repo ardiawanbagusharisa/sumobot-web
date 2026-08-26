@@ -1,4 +1,5 @@
 "use client";
+import { commandHelp, parseBotCommand } from "@/lib/game/commands";
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { BotAppearance } from "./BotVisual";
@@ -421,29 +422,19 @@ export function BattleArena({ mode, playerSkill, playerBotName, playerAppearance
       setCommand("");
       return;
     }
-    if (value === "help") {
-      setCommandLog((items) => [...items.slice(-3), "> help", "forward(x), turnleft(x), turnright(x), dash(), skill()"]);
+    if (value.startsWith("help")) {
+      setCommandLog(commandHelp(value.slice(4).trim()));
       setCommand("");
       return;
     }
 
-    const timed = value.match(/^(forward|turnleft|turnright)\((\d+(?:\.\d+)?)\)$/);
-    const instant = value.match(/^(dash|skill)\(\)$/);
-    let accepted = false;
-
-    if (timed) {
-      const duration = Number(timed[2]);
-      if (duration >= GAME_RULES.actionDuration.minimum && duration <= GAME_RULES.actionDuration.maximum) {
-        accepted = performAction("player", timed[1], duration);
-      }
-    } else if (instant) {
-      accepted = performAction("player", instant[1]);
-    }
+    const parsed = parseBotCommand(value);
+    const accepted = parsed.command ? performAction("player", parsed.command.name, parsed.command.duration) : false;
 
     setCommandLog((items) => [
       ...items.slice(-4),
       `> ${value}`,
-      accepted ? "Command accepted" : "Command rejected · check syntax, cooldown, or duration",
+      accepted ? "Command accepted" : parsed.error ?? "Command rejected · check cooldown",
     ]);
     setCommand("");
   }, [command, performAction]);

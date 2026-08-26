@@ -7,13 +7,15 @@ import { marketItems } from "@/lib/game/prototype-data";
 import { FSM_SCRIPT, MATCH_REWARDS, normalizeActionIntervalMs, PRIMITIVE_SCRIPT, RANK_POINTS, STARTER_SCRIPT, type ControlMode, type MatchResult, type SkillType } from "@/lib/game/rules";
 import type { CampaignAttempt, CampaignLevel, CampaignLevelProgress } from "@/lib/game/campaign";
 import { CampaignCenter } from "./CampaignCenter";
+import { CompetitionCenter } from "./CompetitionCenter";
+import { CompetitionAdmin } from "./CompetitionAdmin";
 import { CampaignMission } from "./CampaignMission";
 import { migrateLegacyJsonScript, parseBotScript } from "@/lib/game/script-runtime";
 import { HOME_DEMO_META, HOME_DEMO_REPLAY } from "@/lib/game/demo-replay";
 import { OnlineRoomBrowser } from "./OnlineRooms";
 import { OnlineBattleRoom } from "./RealtimeBattleRoom";
 import type { OnlineBotSelection } from "@/lib/online/types";
-type View = "home" | "play" | "campaign" | "hangar" | "market" | "leaderboard" | "lab";
+type View = "home" | "play" | "campaign" | "hangar" | "market" | "leaderboard" | "lab" | "competitions" | "admin";
 type CosmeticSlot = (typeof marketItems)[number]["slot"];
 type CosmeticId = (typeof marketItems)[number]["id"];
 type BattleType = "pvai" | "pvp";
@@ -52,6 +54,7 @@ interface LocalPlayer {
     id: string;
     handle: string;
     displayName: string;
+    role: "player" | "admin";
 }
 interface DatabaseLeaderboardEntry {
     playerId: string;
@@ -89,7 +92,7 @@ const navItems: Array<{
 }> = [
     { id: "home", label: "Home", mark: "." },
     { id: "play", label: "Battles", mark: ">" }, { id: "campaign", label: "Campaign", mark: "#" }, { id: "hangar", label: "Hangar", mark: "[]" },
-    { id: "market", label: "Market", mark: "$" }, { id: "leaderboard", label: "Ranks", mark: "^" }, { id: "lab", label: "Lab", mark: "{}" },
+    { id: "market", label: "Market", mark: "$" }, { id: "leaderboard", label: "Ranks", mark: "^" }, { id: "competitions", label: "Seasons", mark: "S" }, { id: "lab", label: "Lab", mark: "{}" }, { id: "admin", label: "Admin", mark: "A" },
 ];
 const modeCopy: Record<ControlMode, {
     title: string;
@@ -541,6 +544,7 @@ export function SumobotApp() {
     };
     const recordCampaignAttempt = (level: CampaignLevel, attempt: CampaignAttempt) => {
         const previous = campaignProgress[level.id];
+        if (attempt.replay) void fetch("/api/campaign-replays", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ replay: attempt.replay }) }).catch(() => undefined);
         const localProgress: CampaignLevelProgress = {
             levelId: level.id,
             status: attempt.completed ? (attempt.stars >= 3 ? "mastered" : "completed") : "active",
@@ -555,6 +559,9 @@ export function SumobotApp() {
             lastCode: attempt.code ?? previous?.lastCode,
             completedAt: attempt.completed ? previous?.completedAt ?? new Date().toISOString() : previous?.completedAt,
             rewardsClaimed: previous?.rewardsClaimed ?? false,
+            completedLessonSteps: Array.from(new Set([...(previous?.completedLessonSteps ?? []), ...(attempt.completedLessonSteps ?? [])])),
+            masteryScore: Math.max(previous?.masteryScore ?? 0, Math.round(attempt.stars / 3 * 70 + Math.max(0, 1 - attempt.hintsViewed / Math.max(1, level.hints.length)) * 30)),
+            improvementPercent: previous?.firstAttemptSeconds ? Math.round((previous.firstAttemptSeconds - Math.min(previous.bestAttemptSeconds ?? attempt.durationSeconds, attempt.durationSeconds)) / previous.firstAttemptSeconds * 100) : 0,
         };
         setCampaignProgress((current) => ({ ...current, [level.id]: localProgress }));
         if (!attempt.completed) { showToast("Training attempt recorded. Review the evidence and try again."); return; }
@@ -702,7 +709,7 @@ export function SumobotApp() {
             }
         } catch { showToast("Online results will refresh when the connection recovers."); }
     }, [applyProfileEnvelope, player]);
-    const visibleNavItems = player ? navItems : navItems.filter((item) => item.id === "home" || item.id === "leaderboard");
+    const visibleNavItems = player ? navItems.filter((item) => item.id !== "admin" || player.role === "admin") : navItems.filter((item) => item.id === "home" || item.id === "leaderboard" || item.id === "competitions");
     const playerRecordStyle = { "--analytics-empty-display": analyticSummary.matches === 0 ? "block" : "none" } as CSSProperties;
     const battleLogPanel = <section className="battle-log-section" aria-labelledby="battle-log-title">
       <div className="battle-log-heading">
@@ -780,7 +787,7 @@ export function SumobotApp() {
     return <main className="app-shell" style={playerRecordStyle}>
     <header className="site-header"><button className="brand" type="button" onClick={() => navigate("home")}><span className="brand-mark"><i /><i /></span><span>SUMO<strong>BOT</strong></span></button><nav>
 {visibleNavItems.map((item) => <button key={item.id} className={view === item.id ? "active" : ""} type="button" onClick={() => navigate(item.id)}><span>{item.mark}</span>{item.label}</button>)}
-</nav><div className="player-strip">{player ? <><span><small>XP</small><strong>{xp}</strong></span><span className="gold-pill"><i />{gold}</span><button className="avatar-button" type="button" onClick={() => navigate("hangar")}>{player.displayName.slice(0, 2).toUpperCase()}</button><button className="text-signout" type="button" onClick={signOut}>Sign out</button></> : <button className="header-login" type="button" onClick={() => setLoginOpen(true)}>Login</button>}</div></header>
+</nav><div className="player-strip">{player ? <><span><small>XP</small><strong>{xp}</strong></span><span className="gold-pill"><i />{gold}</span><button className={`avatar-button ${player.role}`} type="button" title={player.role === "admin" ? "Administrator account" : "Player account"} onClick={() => navigate(player.role === "admin" ? "admin" : "hangar")}>{player.displayName.slice(0, 2).toUpperCase()}</button><button className="text-signout" type="button" onClick={signOut}>Sign out</button></> : <button className="header-login" type="button" onClick={() => setLoginOpen(true)}>Login</button>}</div></header>
 
 
     {view === "home" && homePanel}
@@ -821,6 +828,9 @@ export function SumobotApp() {
     {view === "market" && hangarBot &&
       <section className="content-page page-width market-page"><div className="page-intro"><div><span className="eyebrow">Cosmetic market</span><h1>Make every bot distinct.</h1><p>Equip your bot with the killer looks.</p></div><div className="wallet-card"><small>YOUR BALANCE</small><strong><i className="coin-icon"/> {gold}</strong></div></div><div className="market-filter"><span>Category</span>{(["all", "wheel", "body", "face", "accessory"] as const).map((filter) => <button type="button" key={filter} className={marketFilter === filter ? "active" : ""} onClick={() => setMarketFilter(filter)}>{filter}</button>)}</div><div className="market-scroll"><div className="market-grid">{filteredMarketItems.map((item) => { const isOwned = owned.includes(item.id), equippedBots = bots.filter((bot) => bot.loadout[item.slot] === item.id); return <article className={`market-card ${equippedBots.length ? "equipped" : ""}`} key={item.id}><div className="market-art" style={{ "--item-color": item.color } as CSSProperties}><span className={`cosmetic-shape ${item.slot}`}/><small>{item.slot}</small></div><div className="market-info"><span>{item.rarity}</span><h2>{item.name}</h2><button className={isOwned ? "owned" : ""} type="button" onClick={() => buyOrEquip(item)}>{isOwned ? equippedBots.length ? `Equip · ${equippedBots.length} bot${equippedBots.length === 1 ? "" : "s"}` : "Equip" : <><i className="coin-icon"/> {item.price}</>}</button></div></article>; })}</div></div></section>}
     {marketEquipItem && <div className="equip-prompt-backdrop"><section className="equip-prompt" role="dialog" aria-modal="true" aria-label={`Equip ${marketEquipItem.name}`}><button type="button" className="equip-prompt-close" onClick={() => setMarketEquipItemId(null)}>×</button><span className="eyebrow">Choose a bot</span><h2>Equip {marketEquipItem.name}</h2><p>This changes only the {marketEquipItem.slot} slot.</p><div>{bots.map((bot) => <button type="button" key={bot.id} onClick={() => equipItemOnBot(marketEquipItem.id, bot.id)}><strong>{bot.name}</strong><small>{bot.loadout[marketEquipItem.slot] === marketEquipItem.id ? "Currently equipped" : `Equip ${marketEquipItem.slot}`}</small></button>)}</div></section></div>}
+
+    {view === "competitions" && <CompetitionCenter botId={battleBot.id} mode={mode} onNotice={showToast} />}
+    {view === "admin" && <CompetitionAdmin onNotice={showToast} />}
 
     {view === "leaderboard" && <section className="content-page page-width"><div className="page-intro ranks-intro"><div><span className="eyebrow">Rankings</span><h1>Every claimed match counts.</h1><p>Win +1.00 | Draw +0.50 | Loss +0.25.</p></div><div className="rank-filters"><div><small>BATTLE MODE</small><div className="segmented-control"><button type="button" className={leaderboardBattleMode === "pvai" ? "active" : ""} onClick={() => setLeaderboardBattleMode("pvai")}>vs AI</button><button type="button" className={leaderboardBattleMode === "pvp" ? "active" : ""} onClick={() => setLeaderboardBattleMode("pvp")}>vs Player</button></div></div><div><small>INPUT MODE</small><div className="segmented-control">{(["all", "buttons", "live", "script"] as const).map((filter) => <button type="button" key={filter} className={leaderboardMode === filter ? "active" : ""} onClick={() => setLeaderboardMode(filter)}>{filter}</button>)}</div></div></div></div><div className="leaderboard-table"><div className="table-head"><span>Rank</span><span>Competitor</span><span>Mode</span><span>Record</span><span>Points</span></div>{filteredLeaderboard.length ? filteredLeaderboard.map((entry) => <div className={`table-row ${entry.player === "You" ? "you" : ""}`} key={`${entry.playerId}-${entry.botId}-${entry.mode}`}><strong>#{entry.rank}</strong><span><i>{entry.player.slice(0, 2).toUpperCase()}</i><span><small>{entry.player}</small><strong>{entry.bot}</strong></span></span><span className={`table-mode ${entry.mode}`}>{modeCopy[entry.mode].title}</span><code>{entry.record}</code><strong>{entry.points.toFixed(2)}</strong></div>) : <div className="leaderboard-empty"><strong>No recorded rankings yet.</strong><span>Complete an online or AI battle to create the first ranking in this queue.</span></div>}</div></section>}
 

@@ -4,6 +4,7 @@ export const players = sqliteTable("players", {
   id: text("id").primaryKey(),
   handle: text("handle").notNull(),
   displayName: text("display_name").notNull(),
+  role: text("role", { enum: ["player", "admin"] }).notNull().default("player"),
   level: integer("level").notNull().default(1),
   totalXp: integer("total_xp").notNull().default(0),
   goldBalance: integer("gold_balance").notNull().default(0),
@@ -249,3 +250,41 @@ export const onlineRewardClaims = sqliteTable("online_reward_claims", {
   result: text("result", { enum: ["win", "draw", "loss"] }).notNull(),
   createdAt: text("created_at").notNull(),
 }, (table) => [uniqueIndex("idx_online_reward_room_player").on(table.roomId, table.playerId)]);
+
+
+export const campaignReplays = sqliteTable("campaign_replays", {
+  id: text("id").primaryKey(), playerId: text("player_id").notNull().references(() => players.id),
+  levelId: text("level_id").notNull(), slot: text("slot", { enum: ["best", "latest"] }).notNull(),
+  contentVersion: integer("content_version").notNull(), completed: integer("completed", { mode: "boolean" }).notNull(),
+  stars: integer("stars").notNull(), durationSeconds: real("duration_seconds").notNull(), objectKey: text("object_key").notNull(),
+  createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [uniqueIndex("idx_campaign_replays_player_level_slot").on(table.playerId, table.levelId, table.slot)]);
+
+export const competitions = sqliteTable("competitions", {
+  id: text("id").primaryKey(), title: text("title").notNull(), description: text("description").notNull(),
+  status: text("status", { enum: ["draft","registration","active","closed","cancelled","archived"] }).notNull(),
+  registrationOpensAt: text("registration_opens_at").notNull(), startsAt: text("starts_at").notNull(), endsAt: text("ends_at").notNull(),
+  rulesVersion: integer("rules_version").notNull(), rules: text("rules_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  createdBy: text("created_by").notNull().references(() => players.id), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [index("idx_competitions_status_dates").on(table.status, table.startsAt, table.endsAt)]);
+
+export const competitionEnrollments = sqliteTable("competition_enrollments", {
+  competitionId: text("competition_id").notNull().references(() => competitions.id), playerId: text("player_id").notNull().references(() => players.id), enrolledAt: text("enrolled_at").notNull(),
+}, (table) => [uniqueIndex("idx_competition_enrollment").on(table.competitionId, table.playerId)]);
+
+export const competitionQueueEntries = sqliteTable("competition_queue_entries", {
+  competitionId: text("competition_id").notNull().references(() => competitions.id), playerId: text("player_id").notNull().references(() => players.id),
+  botId: text("bot_id").notNull(), controlMode: text("control_mode", { enum: ["buttons","live","script"] }).notNull(),
+  status: text("status", { enum: ["waiting","matched","cancelled"] }).notNull(), joinedAt: text("joined_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [uniqueIndex("idx_competition_queue_player").on(table.competitionId, table.playerId)]);
+
+export const competitionResults = sqliteTable("competition_results", {
+  id: text("id").primaryKey(), competitionId: text("competition_id").notNull().references(() => competitions.id),
+  matchId: text("match_id").notNull(), playerId: text("player_id").notNull().references(() => players.id),
+  result: text("result", { enum: ["win","draw","loss"] }).notNull(), points: real("points").notNull(), playedAt: text("played_at").notNull(),
+}, (table) => [uniqueIndex("idx_competition_result_match_player").on(table.competitionId, table.matchId, table.playerId), index("idx_competition_results_standings").on(table.competitionId, table.playerId)]);
+
+export const adminAuditEvents = sqliteTable("admin_audit_events", {
+  id: text("id").primaryKey(), adminPlayerId: text("admin_player_id").notNull().references(() => players.id),
+  action: text("action").notNull(), targetId: text("target_id").notNull(), details: text("details_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(), createdAt: text("created_at").notNull(),
+});

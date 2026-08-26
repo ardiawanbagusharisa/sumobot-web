@@ -1,7 +1,7 @@
 "use client";
+import { commandHelp, parseBotCommand } from "@/lib/game/commands";
 
 import { useCallback, useEffect, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { GAME_RULES } from "@/lib/game/rules";
 import { roomPollDelay, type OnlineTransportState } from "@/lib/online/polling";
 import type { OnlineActionName, OnlineActionResult, OnlineBotSelection, OnlineBotState, OnlineMatchState, OnlineRoomView } from "@/lib/online/types";
 import type { RealtimeConnectionTicket, RealtimeServerMessage } from "@/lib/online/realtime-protocol";
@@ -447,22 +447,15 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
     event?.preventDefault();
     const value = command.trim().toLowerCase();
     if (!value) return;
-    if (value === "help") {
-      setCommandLog(["> help", "forward(seconds) · move for 0.1–3 seconds", "turnleft(seconds) · rotate left for 0.1–3 seconds", "turnright(seconds) · rotate right for 0.1–3 seconds", "dash() · burst forward when cooldown is ready", "skill() · activate the equipped skill", "clear · clear this command log"]);
+    if (value.startsWith("help")) {
+      setCommandLog(commandHelp(value.slice(4).trim()));
       setCommand(""); return;
     }
     if (value === "clear") { setCommandLog([]); setCommand(""); return; }
-    const timed = value.match(/^(forward|turnleft|turnright)\((\d+(?:\.\d+)?)\)$/);
-    const instant = value.match(/^(dash|skill)\(\)$/);
+    const parsed = parseBotCommand(value);
     let result: OnlineActionResult | null = null;
-    if (timed) {
-      const duration = Number(timed[2]);
-      if (duration < GAME_RULES.actionDuration.minimum || duration > GAME_RULES.actionDuration.maximum) {
-        setCommandLog((items) => [...items.slice(-6), `> ${value}`, "Rejected · duration must be between 0.1 and 3 seconds"]); setCommand(""); return;
-      }
-      result = await sendAction(timed[1] as OnlineActionName, duration);
-    } else if (instant) result = await sendAction(instant[1] as OnlineActionName);
-    else { setCommandLog((items) => [...items.slice(-6), `> ${value}`, "Unknown command · type help to list commands"]); setCommand(""); return; }
+    if (parsed.command) result = await sendAction(parsed.command.name as OnlineActionName, parsed.command.duration);
+    else { setCommandLog((items) => [...items.slice(-6), `> ${value}`, parsed.error ?? "Command rejected"]); setCommand(""); return; }
     setCommandLog((items) => [...items.slice(-6), `> ${value}`, result ? actionFeedback(result) : "Command acknowledgement timed out"]);
     setCommand("");
   };

@@ -1,4 +1,5 @@
 import type { ControlMode, SkillType } from "./rules";
+import type { CampaignReplayData } from "./campaign-replay";
 
 export type CampaignMissionKind = "route" | "timed-route" | "survival" | "duel" | "debug" | "analysis";
 export type CampaignEnemyArchetype = "passive" | "rusher" | "guard" | "dodger";
@@ -19,6 +20,20 @@ export interface CampaignObstacle {
 export interface CampaignLevelReward {
   xp: number;
   gold: number;
+}
+
+export interface CampaignLessonStep {
+  id: string;
+  title: string;
+  explanation: string;
+  task: string;
+  example?: string;
+  check: "review" | "start" | "checkpoint" | "complete";
+}
+
+export interface CampaignCommonMistake {
+  pattern: string;
+  feedback: string;
 }
 
 export interface CampaignLevel {
@@ -46,6 +61,10 @@ export interface CampaignLevel {
   star3: { label: string; maxCollisions?: number; maxActions?: number; maxSeconds?: number };
   reward: CampaignLevelReward;
   starterSource?: string;
+  contentVersion: number;
+  lessonSteps: CampaignLessonStep[];
+  commandTopics: string[];
+  commonMistakes: CampaignCommonMistake[];
 }
 
 export interface CampaignChapter {
@@ -72,6 +91,9 @@ export interface CampaignLevelProgress {
   lastCode?: string;
   completedAt?: string;
   rewardsClaimed: boolean;
+  completedLessonSteps?: string[];
+  masteryScore?: number;
+  improvementPercent?: number;
 }
 
 export interface CampaignAttempt {
@@ -85,6 +107,9 @@ export interface CampaignAttempt {
   checkpoints: number;
   hintsViewed: number;
   code?: string;
+  completedLessonSteps?: string[];
+  runtimeErrors?: string[];
+  replay?: CampaignReplayData;
 }
 
 export const campaignChapters: CampaignChapter[] = [
@@ -205,7 +230,18 @@ function commentStarterSource(source: string) {
   return source.split("\n").map((line) => `// ${line}`).join("\n");
 }
 
-type LevelInput = Omit<CampaignLevel, "chapter" | "order" | "reward" | "star2" | "star3" | "objectives" | "hints" | "checkpoints" | "obstacles" | "durationSeconds" | "playerTickMs"> & Partial<Pick<CampaignLevel, "objectives" | "hints" | "checkpoints" | "obstacles" | "durationSeconds" | "playerTickMs" | "star2" | "star3">>;
+type LevelInput = Omit<CampaignLevel, "chapter" | "order" | "reward" | "star2" | "star3" | "objectives" | "hints" | "checkpoints" | "obstacles" | "durationSeconds" | "playerTickMs" | "contentVersion" | "lessonSteps" | "commandTopics" | "commonMistakes"> & Partial<Pick<CampaignLevel, "objectives" | "hints" | "checkpoints" | "obstacles" | "durationSeconds" | "playerTickMs" | "star2" | "star3" | "lessonSteps" | "commandTopics" | "commonMistakes">>;
+
+function buildLessonSteps(chapter: number, input: LevelInput): CampaignLessonStep[] {
+  const example = input.mode === "buttons" ? "W forward · A/D turn · E dash · Q skill" : input.mode === "live" ? "forward(0.5); turnleft(0.2)" : chapter <= 4 ? "function decide(game) { return forward(0.2); }" : undefined;
+  const steps: CampaignLessonStep[] = [
+    { id: "understand", title: `Understand ${input.concept}`, explanation: input.briefing, task: input.outcome, example, check: "review" },
+    { id: "prepare", title: input.mode === "script" ? "Prepare the program" : input.mode === "live" ? "Plan the command sequence" : "Review the controls", explanation: input.mode === "script" ? "Read the starter carefully. Remove comment markers only from lines you intend to run, then inspect the logic before submitting." : input.mode === "live" ? "Commands run in queue order on the pilot tick. Type help at any time for the complete command reference." : "Movement continues while a direction control is held. Abilities have cooldowns.", task: input.mode === "script" ? "Make the smallest purposeful code change and submit the program." : "Start when you can explain your first move.", check: "start" },
+    { id: "execute", title: "Execute and observe", explanation: "Watch the objective marker, heading, timer, contacts, and action count. Treat the first run as evidence.", task: input.objectives?.join(" ") ?? input.outcome, check: input.checkpoints?.length ? "checkpoint" : "complete" },
+    { id: "reflect", title: "Review and improve", explanation: "Compare the evidence with the star criteria. Change one decision at a time so you know what improved the result.", task: "Complete the mission, then review the performance analysis.", check: "complete" },
+  ];
+  return chapter >= 6 ? steps.map((step) => ({ ...step, example: undefined })) : steps;
+}
 
 function makeLevel(chapter: number, order: number, input: LevelInput): CampaignLevel {
   const standard = [35, 45, 60, 75, 90, 110][chapter - 1];
@@ -228,6 +264,14 @@ function makeLevel(chapter: number, order: number, input: LevelInput): CampaignL
     star2: input.star2 ?? { label: "Clean execution", maxCollisions: 2 },
     star3: input.star3 ?? { label: "Efficient execution", maxCollisions: 0, maxActions: 24 },
     reward: order === 6 ? { xp: masteryXp, gold: masteryGold } : { xp: standard, gold },
+    contentVersion: 1,
+    lessonSteps: input.lessonSteps ?? buildLessonSteps(chapter, input),
+    commandTopics: input.commandTopics ?? (input.mode === "buttons" ? ["forward", "turnleft", "turnright", "dash", "skill"] : input.mode === "live" ? ["help", "forward", "turnleft", "turnright", "dash", "skill"] : ["decide", "game", input.concept]),
+    commonMistakes: input.commonMistakes ?? [
+      { pattern: "duration", feedback: "Use a duration between 0.1 and 3 seconds." },
+      { pattern: "overshoot", feedback: "Shorten the action duration or tighten the steering threshold." },
+      ...(input.mode === "script" ? [{ pattern: "comment", feedback: "Executable lines cannot begin with //. Remove only the comment markers you need." }] : []),
+    ],
   };
 }
 

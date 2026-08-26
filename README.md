@@ -14,6 +14,18 @@ npm run dev
 
 Open `http://localhost:3000`. Local development uses only free and open-source dependencies; no domain, hosting account, or paid service is required.
 
+## Administrator access
+
+Administrators use the same Login panel as players. The authenticated account role is read from D1; accounts with the `admin` role automatically see the **Admin** navigation item and their avatar opens the admin page.
+
+To create the first administrator locally, add the exact Sumobot handle to `.env.local`, restart the development server, then register or sign in with that handle:
+
+```bash
+SUMOBOT_BOOTSTRAP_ADMIN_HANDLES=owner-handle
+```
+
+The successful registration/login promotes that account persistently in D1. The bootstrap variable can then be removed. Use the same one-time server-only environment variable when initializing a deployed environment; never expose it as a public/client variable.
+
 ## Validate
 
 ```bash

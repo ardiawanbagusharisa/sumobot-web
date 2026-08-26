@@ -3,6 +3,7 @@ import { ensureAuthSchema, type AuthUser } from "@/lib/auth/server";
 import { marketItems } from "@/lib/game/prototype-data";
 import { PRIMITIVE_SCRIPT } from "@/lib/game/rules";
 import { campaignChapters, campaignLevels, levelsForChapter, type CampaignAttempt } from "@/lib/game/campaign";
+import { parseBotScript } from "@/lib/game/script-runtime";
 import { defaultOnlineProfile, type StoredProfile } from "@/lib/profile/default";
 
 
@@ -51,6 +52,9 @@ function normalizeCampaignProgress(value: unknown, preserve?: StoredProfile["cam
       lastCode: typeof entry.lastCode === "string" ? entry.lastCode.slice(0, 40_000) : previous.lastCode,
       completedAt: typeof entry.completedAt === "string" ? entry.completedAt.slice(0, 80) : previous.completedAt,
       rewardsClaimed: Boolean(previous.rewardsClaimed || entry.rewardsClaimed),
+      completedLessonSteps: Array.isArray(entry.completedLessonSteps) ? entry.completedLessonSteps.filter((item): item is string => typeof item === "string").slice(0, 12) : previous.completedLessonSteps,
+      masteryScore: Math.max(0, Math.min(100, Number(entry.masteryScore ?? previous.masteryScore ?? 0))),
+      improvementPercent: Math.max(-100, Math.min(100, Number(entry.improvementPercent ?? previous.improvementPercent ?? 0))),
     }];
   }));
 }
@@ -158,14 +162,32 @@ export async function claimCampaignLevel(user: AuthUser, levelId: string, attemp
   const level = campaignLevels.find((entry) => entry.id === levelId);
   if (!level) return { error: "Unknown campaign mission.", status: 404 as const };
   const attempt = attemptValue && typeof attemptValue === "object" ? attemptValue as Partial<CampaignAttempt> : {};
-  if (!attempt.completed || Number(attempt.stars) < 1) return { error: "The mission objective was not completed.", status: 400 as const };
+  if (!attempt.completed) return { error: "The mission objective was not completed.", status: 400 as const };
+  const durationRaw = Number(attempt.durationSeconds);
+  const collisionsRaw = Number(attempt.collisions);
+  const actionsRaw = Number(attempt.actions);
+  const checkpointsRaw = Math.max(0, Math.floor(Number(attempt.checkpoints ?? 0)));
+  if (![durationRaw, collisionsRaw, actionsRaw].every(Number.isFinite) || durationRaw < 0.1 || durationRaw > level.durationSeconds + 1) return { error: "Campaign evidence is outside the mission bounds.", status: 400 as const };
+  if (level.checkpoints.length && checkpointsRaw < level.checkpoints.length) return { error: "Required checkpoints were not completed.", status: 400 as const };
+  if (level.kind === "survival" && durationRaw < level.durationSeconds - 1) return { error: "The survival timer was not completed.", status: 400 as const };
+  const maximumActions = Math.ceil(level.durationSeconds * 1000 / Math.max(50, level.playerTickMs)) * 5 + 10;
+  if (actionsRaw < 0 || actionsRaw > maximumActions || collisionsRaw < 0 || collisionsRaw > 10_000) return { error: "Campaign telemetry could not be verified.", status: 400 as const };
+  if (level.mode === "script") {
+    if (typeof attempt.code !== "string" || !attempt.code.trim() || attempt.code.length > 40_000) return { error: "A valid mission program is required.", status: 400 as const };
+    try { parseBotScript(attempt.code); } catch { return { error: "The submitted mission program does not compile.", status: 400 as const }; }
+  }
   const current = await getOnlineProfile(user.id) ?? await importOnlineProfile(user, null);
   const previous = current.profile.campaignProgress[level.id] ?? {};
   const previousStars = Math.max(0, Number(previous.bestStars ?? 0));
-  const stars = Math.max(1, Math.min(3, Math.floor(Number(attempt.stars ?? 1))));
-  const duration = Math.max(0.1, Math.min(level.durationSeconds, Number(attempt.durationSeconds ?? level.durationSeconds)));
-  const collisions = Math.max(0, Math.floor(Number(attempt.collisions ?? 0)));
-  const actions = Math.max(0, Math.floor(Number(attempt.actions ?? 0)));
+  const duration = Math.max(0.1, Math.min(level.durationSeconds, durationRaw));
+  const collisions = Math.max(0, Math.floor(collisionsRaw));
+  const actions = Math.max(0, Math.floor(actionsRaw));
+  const within = (target: typeof level.star2) => (target.maxSeconds === undefined || duration <= target.maxSeconds) && (target.maxCollisions === undefined || collisions <= target.maxCollisions) && (target.maxActions === undefined || actions <= target.maxActions);
+  const stars = within(level.star3) ? 3 : within(level.star2) ? 2 : 1;
+  const completedSteps = Array.isArray(attempt.completedLessonSteps) ? attempt.completedLessonSteps.filter((id): id is string => typeof id === "string" && level.lessonSteps.some((step) => step.id === id)) : [];
+  const errorCount = Array.isArray(attempt.runtimeErrors) ? Math.min(20, attempt.runtimeErrors.length) : 0;
+  const independence = Math.max(0, 1 - Number(attempt.hintsViewed ?? 0) / Math.max(1, level.hints.length));
+  const masteryScore = Math.round(stars / 3 * 55 + independence * 20 + Math.max(0, 1 - errorCount / 5) * 15 + completedSteps.length / level.lessonSteps.length * 10);
   const firstReward = !previous.rewardsClaimed;
   const nextProgress: StoredProfile["campaignProgress"] = {
     ...current.profile.campaignProgress,
@@ -184,6 +206,9 @@ export async function claimCampaignLevel(user: AuthUser, levelId: string, attemp
       lastCode: typeof attempt.code === "string" ? attempt.code.slice(0, 40_000) : previous.lastCode,
       completedAt: typeof previous.completedAt === "string" ? previous.completedAt : new Date().toISOString(),
       rewardsClaimed: true,
+      completedLessonSteps: Array.from(new Set([...(Array.isArray(previous.completedLessonSteps) ? previous.completedLessonSteps : []), ...completedSteps])),
+      masteryScore: Math.max(Number(previous.masteryScore ?? 0), masteryScore),
+      improvementPercent: previous.firstAttemptSeconds ? Math.round((Number(previous.firstAttemptSeconds) - Math.min(Number(previous.bestAttemptSeconds ?? duration), duration)) / Number(previous.firstAttemptSeconds) * 100) : 0,
     },
   };
   const chapterKey = String(level.chapter);

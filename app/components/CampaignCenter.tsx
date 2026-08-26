@@ -1,6 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { CampaignReplay } from "./CampaignReplay";
+import type { CampaignReplayData } from "@/lib/game/campaign-replay";
 import {
   campaignChapters,
   campaignLevels,
@@ -28,6 +30,8 @@ function masteryLabel(stars: number, levels: number) {
 
 export function CampaignCenter({ progress, claimedLicenses, onStart }: CampaignCenterProps) {
   const [tab, setTab] = useState<"path" | "console">("path");
+  const [replayLevels, setReplayLevels] = useState(new Set<string>());
+  const [replay, setReplay] = useState<CampaignReplayData | null>(null);
   const firstAvailable = campaignLevels.find((level) => levelIsUnlocked(level, progress) && !(progress[level.id]?.bestStars));
   const [selectedId, setSelectedId] = useState(firstAvailable?.id ?? campaignLevels[0].id);
   const selected = campaignLevels.find((level) => level.id === selectedId) ?? campaignLevels[0];
@@ -38,6 +42,8 @@ export function CampaignCenter({ progress, claimedLicenses, onStart }: CampaignC
   const totalAttempts = Object.values(progress).reduce((sum, item) => sum + (item.attempts ?? 0), 0);
   const averageBest = completedLevels.length ? completedLevels.reduce((sum, level) => sum + (progress[level.id]?.bestAttemptSeconds ?? 0), 0) / completedLevels.length : 0;
   const averageContacts = completedLevels.length ? completedLevels.reduce((sum, level) => sum + (progress[level.id]?.bestCollisions ?? 0), 0) / completedLevels.length : 0;
+  useEffect(() => { void fetch("/api/campaign-replays", { cache: "no-store" }).then((response) => response.ok ? response.json() : null).then((payload: { replays?: Array<{ levelId: string }> } | null) => setReplayLevels(new Set(payload?.replays?.map((item) => item.levelId) ?? []))).catch(() => undefined); }, []);
+  const watchReplay = async (levelId: string) => { const response = await fetch("/api/campaign-replays?levelId=" + encodeURIComponent(levelId) + "&slot=best", { cache: "no-store" }); if (response.ok) { const payload = await response.json() as { replay: CampaignReplayData }; setReplay(payload.replay); } };
   const recent = useMemo(() => Object.values(progress).filter((item) => item.completedAt).sort((a, b) => String(b.completedAt).localeCompare(String(a.completedAt))).slice(0, 5), [progress]);
 
   return (
@@ -87,7 +93,7 @@ export function CampaignCenter({ progress, claimedLicenses, onStart }: CampaignC
           <section><small>MISSION OBJECTIVES</small>{selected.objectives.map((objective) => <p key={objective}>→ {objective}</p>)}</section>
           <div className="dossier-reward"><small>FIRST COMPLETION</small><strong>{selected.reward.xp} XP</strong><strong>{selected.reward.gold} gold</strong></div>
           <div className="dossier-stars"><span>★ Complete the objective</span><span>★★ {selected.star2.label}</span><span>★★★ {selected.star3.label}</span></div>
-          <button type="button" disabled={!levelIsUnlocked(selected, progress)} onClick={() => onStart(selected)}>{progress[selected.id]?.bestStars ? "Replay mission" : "Launch mission"} →</button>
+          <div className="dossier-actions"><button type="button" disabled={!levelIsUnlocked(selected, progress)} onClick={() => onStart(selected)}>{progress[selected.id]?.bestStars ? "Replay mission" : "Launch mission"} →</button>{replayLevels.has(selected.id) && <button type="button" className="secondary" onClick={() => void watchReplay(selected.id)}>Watch best replay</button>}</div>
         </aside>
       </div> : <div className="learning-console">
         <div className="learning-summary-grid">
@@ -113,12 +119,13 @@ export function CampaignCenter({ progress, claimedLicenses, onStart }: CampaignC
 
           <section className="learning-recent-panel"><span className="eyebrow">Learning record</span><h2>Recent evidence</h2>{recent.length ? recent.map((item) => {
             const level = campaignLevels.find((entry) => entry.id === item.levelId);
-            return <article key={item.levelId}><span>{item.bestStars}★</span><div><strong>{level?.title ?? item.levelId}</strong><small>{level?.concept} · {item.attempts} attempt{item.attempts === 1 ? "" : "s"}</small></div><time>{item.bestAttemptSeconds ? `${Math.round(item.bestAttemptSeconds)}s best` : "Completed"}</time></article>;
+            return <article key={item.levelId}><span>{item.bestStars}★</span><div><strong>{level?.title ?? item.levelId}</strong><small>{level?.concept} · {item.attempts} attempt{item.attempts === 1 ? "" : "s"} · {Math.round(item.masteryScore ?? item.bestStars / 3 * 100)}% mastery</small></div><time>{item.improvementPercent ? `↑${item.improvementPercent}% · ` : ""}{item.bestAttemptSeconds ? `${Math.round(item.bestAttemptSeconds)}s best` : "Completed"}</time></article>;
           }) : <p className="console-empty">Your completed missions, best evidence, and improvements will appear here.</p>}</section>
 
           <section className="learning-next-panel"><span className="eyebrow">Recommended assignment</span><h2>{firstAvailable?.title ?? "Certification complete"}</h2><p>{firstAvailable?.outcome ?? "You have completed the full AI Engineer pathway. Improve mission stars or revisit any license trial."}</p>{firstAvailable && <button type="button" onClick={() => onStart(firstAvailable)}>Continue training →</button>}</section>
         </div>
       </div>}
+      {replay && <CampaignReplay data={replay} onClose={() => setReplay(null)} />}
     </section>
   );
 }

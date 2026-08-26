@@ -6,6 +6,8 @@ import { BotVisual } from "./BotVisual";
 import type { CampaignAttempt, CampaignLevel } from "@/lib/game/campaign";
 import { createScriptRuntime } from "@/lib/game/script-runtime";
 import { GAME_RULES, type SkillType } from "@/lib/game/rules";
+import { BOT_COMMANDS, commandHelp, parseBotCommand } from "@/lib/game/commands";
+import { campaignMissionSnapshot, type CampaignReplayEvent, type CampaignReplayFrame } from "@/lib/game/campaign-replay";
 
 interface CampaignMissionProps {
   level: CampaignLevel;
@@ -116,6 +118,10 @@ export function CampaignMission({ level, botName, botSkill, botAppearance, saved
   const heldRef = useRef(new Set<"forward" | "turnleft" | "turnright">());
   const runtimeRef = useRef<ReturnType<typeof createScriptRuntime> | null>(null);
   const finishGuardRef = useRef(false);
+  const runtimeErrorsRef = useRef<string[]>([]);
+  const replayFramesRef = useRef<CampaignReplayFrame[]>([]);
+  const replayEventsRef = useRef<CampaignReplayEvent[]>([]);
+  const nextReplayFrameRef = useRef(0);
 
   const [status, setStatus] = useState<MissionStatus>("briefing");
   const [message, setMessage] = useState("Review the mission briefing");
@@ -124,11 +130,13 @@ export function CampaignMission({ level, botName, botSkill, botAppearance, saved
   const [collisions, setCollisions] = useState(0);
   const [actions, setActions] = useState(0);
   const [command, setCommand] = useState("");
-  const [commandLog, setCommandLog] = useState<string[]>(["Command deck online."]);
+  const [commandLog, setCommandLog] = useState<string[]>(["Command deck online. Type help for commands."]);
   const [script, setScript] = useState(level.starterSource ?? savedScript);
   const [scriptStatus, setScriptStatus] = useState(level.mode === "script" ? "Starter commented · remove // markers before submitting" : "Starter program ready");
   const [revealedHints, setRevealedHints] = useState(0);
   const [result, setResult] = useState<CampaignAttempt | null>(null);
+  const [activeLessonStep, setActiveLessonStep] = useState(0);
+  const [referenceOpen, setReferenceOpen] = useState(false);
 
   const performAction = useCallback((unit: MobileUnit, name: string, duration = 0.2, countPlayer = false) => {
     if (!runningRef.current) return false;
@@ -167,6 +175,7 @@ export function CampaignMission({ level, botName, botSkill, botAppearance, saved
     let stars: 0 | 1 | 2 | 3 = completed ? 1 : 0;
     if (completed && withinThresholds(level.star2, metrics)) stars = 2;
     if (completed && withinThresholds(level.star3, metrics)) stars = 3;
+    replayEventsRef.current.push({ at: seconds, type: "complete", label: reason });
     const attempt: CampaignAttempt = {
       levelId: level.id,
       completed,
@@ -178,13 +187,25 @@ export function CampaignMission({ level, botName, botSkill, botAppearance, saved
       checkpoints: checkpointRef.current,
       hintsViewed: hintsRef.current,
       code: level.mode === "script" ? script : undefined,
+      completedLessonSteps: level.lessonSteps.filter((step) => step.check === "review" || step.check === "start" || (step.check === "checkpoint" && checkpointRef.current > 0) || (step.check === "complete" && completed)).map((step) => step.id),
+      runtimeErrors: runtimeErrorsRef.current,
+      replay: {
+        schemaVersion: 1,
+        kind: "campaign",
+        recordedAt: new Date().toISOString(),
+        mission: campaignMissionSnapshot(level),
+        player: { name: botName, skill: botSkill, appearance: { ...botAppearance } },
+        frames: replayFramesRef.current,
+        events: replayEventsRef.current,
+        result: { completed, stars, seconds, collisions: collisionsRef.current, actions: actionsRef.current },
+      },
     };
     setTimeLeft(Math.max(0, level.durationSeconds - seconds));
     setResult(attempt);
     setStatus(completed ? "success" : "failure");
     setMessage(reason);
     onFinish(attempt);
-  }, [level, onFinish, script]);
+  }, [botAppearance, botName, botSkill, level, onFinish, script]);
 
   const compileScript = useCallback(() => {
     try {
@@ -194,7 +215,9 @@ export function CampaignMission({ level, botName, botSkill, botAppearance, saved
       return true;
     } catch (error) {
       runtimeRef.current = null;
-      setScriptStatus(error instanceof Error ? error.message : "Program could not be compiled");
+      const message = error instanceof Error ? error.message : "Program could not be compiled";
+      runtimeErrorsRef.current.push(message);
+      setScriptStatus(message);
       return false;
     }
   }, [script]);
@@ -211,8 +234,12 @@ export function CampaignMission({ level, botName, botSkill, botAppearance, saved
     wheelTrailsRef.current = [];
     nextTrailAtRef.current = 0;
     commandQueueRef.current = [];
+    runtimeErrorsRef.current = [];
+    replayFramesRef.current = [];
+    replayEventsRef.current = [];
     finishGuardRef.current = false;
     const now = performance.now();
+    nextReplayFrameRef.current = now;
     startedAtRef.current = now;
     lastFrameRef.current = now;
     nextPlayerDecisionRef.current = now;
@@ -231,6 +258,7 @@ export function CampaignMission({ level, botName, botSkill, botAppearance, saved
   const submitScript = useCallback(() => {
     if (!compileScript()) return;
     startMission();
+    replayEventsRef.current.push({ at: 0, type: "script-submit", label: "Program submitted and started" });
   }, [compileScript, startMission]);
 
   const returnToScriptEditor = useCallback(() => {
@@ -245,18 +273,17 @@ export function CampaignMission({ level, botName, botSkill, botAppearance, saved
   const queueCommands = useCallback(() => {
     const values = command.split(";").map((item) => item.trim().toLowerCase()).filter(Boolean);
     if (!values.length) return;
+    if (values.length === 1 && values[0] === "clear") { setCommandLog([]); setCommand(""); return; }
+    if (values.length === 1 && values[0].startsWith("help")) { setCommandLog(commandHelp(values[0].slice(4).trim())); setCommand(""); return; }
     const parsed: Array<{ name: string; duration?: number }> = [];
     for (const value of values) {
-      const timed = value.match(/^(forward|turnleft|turnright)\((\d+(?:\.\d+)?)\)$/);
-      const instant = value.match(/^(dash|skill)\(\)$/);
-      if (timed) parsed.push({ name: timed[1], duration: Number(timed[2]) });
-      else if (instant) parsed.push({ name: instant[1] });
-      else {
-        setCommandLog((items) => [...items.slice(-4), `> ${value}`, "Command rejected. Use help for syntax."]);
-        return;
-      }
+      const parsedValue = parseBotCommand(value);
+      if (parsedValue.command) parsed.push(parsedValue.command);
+      else { setCommandLog((items) => [...items.slice(-6), `> ${value}`, parsedValue.error ?? "Command rejected."]); return; }
     }
     commandQueueRef.current.push(...parsed);
+    const at = runningRef.current ? Math.max(0, (performance.now() - startedAtRef.current) / 1000) : 0;
+    replayEventsRef.current.push({ at, type: "command", label: parsed.length + " command" + (parsed.length === 1 ? "" : "s") + " queued: " + values.join("; ") });
     setCommandLog((items) => [...items.slice(-4), `> ${values.join("; ")}`, `${parsed.length} command${parsed.length === 1 ? "" : "s"} queued.`]);
     setCommand("");
   }, [command]);
@@ -387,7 +414,12 @@ export function CampaignMission({ level, botName, botSkill, botAppearance, saved
           if (action) performAction(player, action.name, action.duration, true);
           setScriptStatus("Program running");
         } catch (error) {
-          setScriptStatus(error instanceof Error ? error.message : "Runtime error");
+          const runtimeMessage = error instanceof Error ? error.message : "Runtime error";
+          if (runtimeErrorsRef.current.at(-1) !== runtimeMessage) {
+            runtimeErrorsRef.current.push(runtimeMessage);
+            replayEventsRef.current.push({ at: Math.max(0, (now - startedAtRef.current) / 1000), type: "runtime-error", label: runtimeMessage });
+          }
+          setScriptStatus(runtimeMessage);
         }
       }
       nextPlayerDecisionRef.current = now + level.playerTickMs;
@@ -454,6 +486,7 @@ export function CampaignMission({ level, botName, botSkill, botAppearance, saved
         const activeCheckpoint = level.checkpoints[checkpointRef.current];
         if (activeCheckpoint && Math.hypot(player.x - activeCheckpoint.x, player.y - activeCheckpoint.y) < player.radius + 24) {
           checkpointRef.current += 1;
+          replayEventsRef.current.push({ at: Math.max(0, (now - startedAtRef.current) / 1000), type: "checkpoint", label: "Checkpoint " + checkpointRef.current + "/" + level.checkpoints.length + " secured" });
           setCheckpoints(checkpointRef.current);
           setMessage(`Checkpoint ${checkpointRef.current}/${level.checkpoints.length} secured`);
           if (checkpointRef.current >= level.checkpoints.length && !level.enemy && level.kind !== "survival") finishMission(true, "Mission objectives complete");
@@ -463,6 +496,10 @@ export function CampaignMission({ level, botName, botSkill, botAppearance, saved
         const enemyOut = Math.hypot(enemy.x - ARENA_X, enemy.y - ARENA_Y) > ARENA_RADIUS + enemy.radius;
         const elapsed = (now - startedAtRef.current) / 1000;
         const remaining = level.durationSeconds - elapsed;
+        if (now >= nextReplayFrameRef.current) {
+          replayFramesRef.current.push({ at: elapsed, remaining: Math.max(0, remaining), checkpoint: checkpointRef.current, player: { x: player.x, y: player.y, angle: player.angle, skillActive: now < player.skillUntil }, enemy: level.enemy ? { x: enemy.x, y: enemy.y, angle: enemy.angle, skillActive: now < enemy.skillUntil } : undefined });
+          nextReplayFrameRef.current = now + 100;
+        }
         if (playerOut) finishMission(false, "Unit left the mission boundary");
         else if (level.kind === "duel" && enemyOut) finishMission(true, "Opponent removed from the arena");
         else if (level.collisionLimit !== undefined && collisionsRef.current > level.collisionLimit) finishMission(false, "Collision limit exceeded");
@@ -539,6 +576,7 @@ export function CampaignMission({ level, botName, botSkill, botAppearance, saved
 
   const revealHint = () => {
     const next = Math.min(level.hints.length, revealedHints + 1);
+    replayEventsRef.current.push({ at: runningRef.current ? Math.max(0, (performance.now() - startedAtRef.current) / 1000) : 0, type: "hint", label: "Hint " + next + " viewed" });
     setRevealedHints(next);
     hintsRef.current = Math.max(hintsRef.current, next);
   };
@@ -582,6 +620,8 @@ export function CampaignMission({ level, botName, botSkill, botAppearance, saved
         </div>
 
         <aside className="mission-brief-panel">
+          <div className="mission-lesson-panel"><div><span className="eyebrow">Guided lesson · {activeLessonStep + 1}/{level.lessonSteps.length}</span><button type="button" onClick={() => setReferenceOpen((open) => !open)}>{referenceOpen ? "Hide reference" : "Command reference"}</button></div>{level.lessonSteps.map((step, index) => <article key={step.id} className={index === activeLessonStep ? "active" : index < activeLessonStep ? "done" : ""}><button type="button" onClick={() => setActiveLessonStep(index)}><i>{index < activeLessonStep ? "✓" : index + 1}</i><span><strong>{step.title}</strong><small>{step.task}</small></span></button>{index === activeLessonStep && <div><p>{step.explanation}</p>{step.example && <code>{step.example}</code>}<button type="button" disabled={index >= level.lessonSteps.length - 1} onClick={() => setActiveLessonStep((value) => Math.min(level.lessonSteps.length - 1, value + 1))}>Mark reviewed →</button></div>}</article>)}</div>
+          {referenceOpen && <div className="mission-command-reference"><strong>Available commands</strong>{BOT_COMMANDS.map((item) => <span key={item.name}><code>{item.syntax}</code><small>{item.detail}</small></span>)}</div>}
           <span className="eyebrow">Training objective</span>
           <h2>{level.concept}</h2>
           <p>{level.outcome}</p>
@@ -589,6 +629,7 @@ export function CampaignMission({ level, botName, botSkill, botAppearance, saved
           <div className="mission-star-criteria"><span><b>★</b> Complete the core objective</span><span><b>★★</b> {level.star2.label}</span><span><b>★★★</b> {level.star3.label}</span></div>
           <div className="mission-reward"><small>FIRST COMPLETION</small><strong>{level.reward.xp} XP · {level.reward.gold} gold</strong></div>
           <div className="mission-hints"><div><span>Guidance channel</span><button type="button" onClick={revealHint} disabled={revealedHints >= level.hints.length}>{revealedHints ? "Next hint" : "Request hint"}</button></div>{level.hints.slice(0, revealedHints).map((hint, index) => <p key={hint}><b>H{index + 1}</b>{hint}</p>)}</div>
+          <div className="mission-common-mistakes"><small>COMMON CHECKS</small>{level.commonMistakes.map((mistake) => <p key={mistake.pattern}><b>{mistake.pattern}</b>{mistake.feedback}</p>)}</div>
           {previousBest && <div className="mission-personal-best"><small>PERSONAL BEST</small><strong>{previousBest.stars}★ {previousBest.seconds ? `· ${Math.round(previousBest.seconds)}s` : ""}</strong><span>{previousBest.collisions ?? 0} contacts</span></div>}
         </aside>
       </div>

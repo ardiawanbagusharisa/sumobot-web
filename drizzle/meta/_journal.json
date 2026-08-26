@@ -36,6 +36,20 @@
       "when": 1786403772854,
       "tag": "0004_flowery_black_bird",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1787716898571,
+      "tag": "0005_dear_carnage",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1787720988559,
+      "tag": "0006_daffy_skaar",
+      "breakpoints": true
     }
   ]
 }

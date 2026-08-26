@@ -8,10 +8,12 @@ const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
 // the runtime limit changes without invalidating existing accounts.
 const PASSWORD_ITERATIONS = 100_000;
 
+export type AccountRole = "player" | "admin";
 export interface AuthUser {
   id: string;
   handle: string;
   displayName: string;
+  role: AccountRole;
 }
 
 interface CredentialRow extends AuthUser {
@@ -30,6 +32,7 @@ export async function ensureAuthSchema() {
       id TEXT PRIMARY KEY NOT NULL,
       handle TEXT NOT NULL,
       display_name TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'player',
       level INTEGER NOT NULL DEFAULT 1,
       total_xp INTEGER NOT NULL DEFAULT 0,
       gold_balance INTEGER NOT NULL DEFAULT 0,
@@ -61,6 +64,10 @@ export async function ensureAuthSchema() {
     )`),
     d1.prepare("CREATE INDEX IF NOT EXISTS idx_auth_sessions_player ON auth_sessions(player_id)"),
   ]);
+  const playerColumns = await d1.prepare("PRAGMA table_info(players)").all<{ name: string }>();
+  if (!playerColumns.results.some((column) => column.name === "role")) {
+    await d1.prepare("ALTER TABLE players ADD COLUMN role TEXT NOT NULL DEFAULT 'player'").run();
+  }
   schemaReady = true;
 }
 
@@ -78,6 +85,12 @@ export function validateCredentials(loginId: string, password: unknown) {
   return null;
 }
 
+function bootstrapRole(handle: string): AccountRole {
+  const configured = process.env.SUMOBOT_BOOTSTRAP_ADMIN_HANDLES ?? process.env.SUMOBOT_ADMIN_HANDLES ?? "";
+  const handles = configured.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
+  return handles.includes(handle.toLowerCase()) ? "admin" : "player";
+}
+
 export async function registerAccount(loginId: string, password: string) {
   await ensureAuthSchema();
   const d1 = await getDatabase();
@@ -89,11 +102,12 @@ export async function registerAccount(loginId: string, password: string) {
   const passwordHash = await derivePasswordHash(password, salt, PASSWORD_ITERATIONS);
   const now = new Date().toISOString();
   const profile = defaultOnlineProfile();
+  const role = bootstrapRole(loginId);
   await d1.batch([
     d1.prepare(`INSERT INTO players
-      (id, handle, display_name, level, total_xp, gold_balance, unlocked_modes, created_at, updated_at)
-      VALUES (?, ?, ?, 1, ?, ?, '["buttons"]', ?, ?)`)
-      .bind(playerId, loginId, loginId, profile.xp, profile.gold, now, now),
+      (id, handle, display_name, role, level, total_xp, gold_balance, unlocked_modes, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 1, ?, ?, '["buttons"]', ?, ?)`)
+      .bind(playerId, loginId, loginId, role, profile.xp, profile.gold, now, now),
     d1.prepare(`INSERT INTO auth_credentials
       (player_id, password_hash, password_salt, password_iterations, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?)`)
@@ -101,7 +115,7 @@ export async function registerAccount(loginId: string, password: string) {
     d1.prepare("INSERT INTO online_profiles (player_id, profile, revision, imported_at, updated_at) VALUES (?, ?, 1, ?, ?)")
       .bind(playerId, JSON.stringify(profile), now, now),
   ]);
-  return createSession({ id: playerId, handle: loginId, displayName: loginId });
+  return createSession({ id: playerId, handle: loginId, displayName: loginId, role });
 }
 
 export async function loginAccount(loginId: string, password: string) {
@@ -111,6 +125,7 @@ export async function loginAccount(loginId: string, password: string) {
       p.id AS id,
       p.handle AS handle,
       p.display_name AS displayName,
+      p.role AS role,
       c.password_hash AS passwordHash,
       c.password_salt AS passwordSalt,
       c.password_iterations AS passwordIterations
@@ -126,7 +141,10 @@ export async function loginAccount(loginId: string, password: string) {
   if (!constantTimeEqual(candidate, row.passwordHash)) {
     return { error: "Incorrect user ID or password.", status: 401 as const };
   }
-  return createSession({ id: row.id, handle: row.handle, displayName: row.displayName });
+  const configuredRole = bootstrapRole(row.handle);
+  const role: AccountRole = row.role === "admin" || configuredRole === "admin" ? "admin" : "player";
+  if (role !== row.role) await d1.prepare("UPDATE players SET role = 'admin', updated_at = ? WHERE id = ?").bind(new Date().toISOString(), row.id).run();
+  return createSession({ id: row.id, handle: row.handle, displayName: row.displayName, role });
 }
 
 export async function getSessionUser(request: Request): Promise<AuthUser | null> {
@@ -138,7 +156,8 @@ export async function getSessionUser(request: Request): Promise<AuthUser | null>
   const user = await d1.prepare(`SELECT
       p.id AS id,
       p.handle AS handle,
-      p.display_name AS displayName
+      p.display_name AS displayName,
+      p.role AS role
     FROM auth_sessions s
     INNER JOIN players p ON p.id = s.player_id
     WHERE s.token_hash = ? AND s.expires_at > ?
