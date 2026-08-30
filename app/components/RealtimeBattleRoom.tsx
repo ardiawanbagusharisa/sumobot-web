@@ -16,6 +16,8 @@ interface OnlineBattleRoomProps {
   selectedBotId: string;
   onExit: () => void;
   onProfileChanged: () => void;
+  autoReturnSeconds?: number;
+  returnLabel?: string;
 }
 
 type RenderBot = Pick<OnlineBotState, "x" | "y" | "angle" | "vx" | "vy" | "turnUntil" | "turnDirection" | "spinVelocity" | "stunnedUntil" | "skillUntil" | "skill">;
@@ -88,7 +90,7 @@ function collisionBurst(x: number, y: number) {
   });
 }
 
-export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfileChanged }: OnlineBattleRoomProps) {
+export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfileChanged, autoReturnSeconds, returnLabel = "Return to rooms" }: OnlineBattleRoomProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hostVisualRef = useRef<HTMLDivElement>(null);
   const guestVisualRef = useRef<HTMLDivElement>(null);
@@ -123,6 +125,7 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
   const [controlsOpen, setControlsOpen] = useState(() => typeof window === "undefined" || !window.matchMedia("(max-width: 680px)").matches);
   const [terminalOpen, setTerminalOpen] = useState(true);
   const [scriptOpen, setScriptOpen] = useState(true);
+  const [returnDeadline,setReturnDeadline]=useState<number|null>(null);
   const battleViewportMounted = Boolean(room?.match && room.guest && (room.status === "live" || room.status === "completed"));
 
   const setTransport = useCallback((next: OnlineTransportState) => {
@@ -135,9 +138,10 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
     setRoom(next);
     if (next.status === "completed" && !completedRef.current) {
       completedRef.current = true;
+      if(autoReturnSeconds)setReturnDeadline(Date.now()+autoReturnSeconds*1000);
       onProfileChanged();
     }
-  }, [onProfileChanged]);
+  }, [autoReturnSeconds,onProfileChanged]);
 
   useEffect(() => {
     const updateVisibility = () => setPageVisible(!document.hidden);
@@ -420,6 +424,8 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
     return () => cancelAnimationFrame(frame);
   }, [battleViewportMounted]);
 
+  useEffect(()=>{if(!returnDeadline)return;const tick=window.setInterval(()=>setClock(Date.now()),1000);const timer=window.setTimeout(onExit,Math.max(0,returnDeadline-Date.now()));return()=>{window.clearInterval(tick);window.clearTimeout(timer)}},[onExit,returnDeadline]);
+
   useEffect(() => () => {
     const socket = socketRef.current;
     if (roomRef.current?.status !== "completed" && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "leave" }));
@@ -471,6 +477,7 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
 
   const setupRemaining = room ? Math.max(0, Math.ceil((((room.currentSide === "host" ? room.host : room.guest)?.setupDeadline ?? clock) - clock) / 1000)) : 0;
   const countdown = room?.countdownEndsAt ? Math.max(0, Math.ceil((room.countdownEndsAt - clock) / 1000)) : 0;
+  const returnRemaining=returnDeadline?Math.max(0,Math.ceil((returnDeadline-clock)/1000)):null;
   if (!room) return <section className="online-lobby loading"><strong>Connecting to room {roomId}</strong><span>{message}</span></section>;
   if (room.status === "waiting" || room.status === "countdown") {
     const ownPlayer = room.currentSide === "host" ? room.host : room.guest;
@@ -512,7 +519,7 @@ export function OnlineBattleRoom({ roomId, bots, selectedBotId, onExit, onProfil
       leaveLabel="Leave arena"
     >
       <BotDiagnosticsPanels left={diagnosticSnapshot(match.bots.host)} right={diagnosticSnapshot(match.bots.guest)} />
-      {room.status === "completed" && <div className="match-finished-actions"><strong>{room.completionReason === "disconnect" ? "Opponent disconnected" : "Match complete"}</strong><span>Rewards and leaderboard points were applied online.</span><div><button type="button" className="claim-reward" onClick={onExit}>Return to rooms</button></div></div>}
+      {room.status === "completed" && <div className="match-finished-actions"><strong>{room.completionReason === "disconnect" ? "Opponent disconnected" : "Match complete"}</strong><span>{returnRemaining!==null?`Returning to Seasons in ${returnRemaining}s so you can choose the next opponent.`:"Rewards and leaderboard points were applied online."}</span><div><button type="button" className="claim-reward" onClick={onExit}>{returnLabel}</button></div></div>}
     </BattleViewport>
 
     {room.status !== "completed" && <div className={`battle-controls arena-control-overlay ${room.controlMode} ${controlsOpen ? "open" : "collapsed"}`}>

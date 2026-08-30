@@ -1,4 +1,5 @@
 import { getDatabase } from "@/lib/db/server";
+import { finalizeCompetitionRoom } from "@/lib/competitions/results";
 import { ensureAuthSchema, type AuthUser } from "@/lib/auth/server";
 import { ensureProfileSchema, getOnlineProfile } from "@/lib/profile/server";
 import { roomSynchronizationNeedsPersistence } from "@/lib/online/polling";
@@ -283,6 +284,33 @@ export async function joinOnlineRoom(user: AuthUser, roomId: string, accessCode:
   return { error: "The room changed while joining. Please try once more.", status: 409 as const };
 }
 
+export async function createCompetitionOnlineRoom(hostUser: AuthUser, guestUser: AuthUser, hostBotValue: unknown, guestBotValue: unknown, controlMode: ControlMode, roundSeconds: number, actionIntervalMs: number) {
+  await ensureOnlineRoomSchema();
+  if (hostUser.id === guestUser.id) return { error: "A player cannot battle themselves.", status: 400 as const };
+  const hostBot = validateBot(hostBotValue, controlMode), guestBot = validateBot(guestBotValue, controlMode);
+  if (!hostBot || !guestBot) return { error: "Both competitors need a valid bot and script for this mode.", status: 400 as const };
+  const db = await getDatabase();
+  const active = await db.prepare("SELECT id FROM online_rooms WHERE (host_player_id IN (?,?) OR guest_player_id IN (?,?)) AND status != 'completed' LIMIT 1")
+    .bind(hostUser.id,guestUser.id,hostUser.id,guestUser.id).first<{id:string}>();
+  if (active) return { error: "One competitor is already in another battle. Both players were returned to standby.", status: 409 as const };
+  const nowMs=Date.now(),now=new Date(nowMs).toISOString(),deadline=nowMs+30_000;
+  for(let attempt=0;attempt<4;attempt+=1){
+    const id=generateRoomId();
+    try{
+      await db.prepare(`INSERT INTO online_rooms
+        (id,is_private,access_code_hash,status,control_mode,round_seconds,action_interval_ms,
+         host_player_id,guest_player_id,host_player,guest_player,host_ready,guest_ready,
+         host_setup_deadline,guest_setup_deadline,last_host_seen_at,last_guest_seen_at,version,created_at,updated_at)
+        VALUES (?,0,NULL,'waiting',?,?,?,?,?,?,?,0,0,?,?,?,?,1,?,?)`)
+        .bind(id,controlMode,roundSeconds,normalizeActionIntervalMs(actionIntervalMs),hostUser.id,guestUser.id,
+          JSON.stringify(makePlayer(hostUser,hostBot,deadline)),JSON.stringify(makePlayer(guestUser,guestBot,deadline)),
+          deadline,deadline,nowMs,nowMs,now,now).run();
+      return { roomId:id };
+    }catch(error){ if(attempt===3) return { error:error instanceof Error?error.message:"Unable to allocate the competition room.",status:503 as const }; }
+  }
+  return { error:"Unable to allocate the competition room.",status:503 as const };
+}
+
 function updatePlayerJson(row: RoomRow, side: RoomSide, player: OnlineRoomPlayer) {
   if (side === "host") row.hostPlayer = JSON.stringify(player);
   else row.guestPlayer = JSON.stringify(player);
@@ -526,9 +554,11 @@ function replayFor(row: RoomRow, match: OnlineMatchState | null) {
 
 async function finalizeOnlineRoom(row: RoomRow) {
   if (!row.guestPlayerId) return;
+  await finalizeCompetitionRoom(row.id,row.winnerPlayerId,row.completionReason);
   const d1 = await getDatabase();
   const match = parseMatch(row.matchState);
   const replay = replayFor(row, match);
+  const competition = await d1.prepare(`SELECT c.id,c.title FROM competition_pairings cp INNER JOIN competitions c ON c.id=cp.competition_id WHERE cp.room_id=? LIMIT 1`).bind(row.id).first<{id:string;title:string}>();
   const now = row.completedAt ?? new Date().toISOString();
   const participants = [
     { side: "host" as const, id: row.hostPlayerId, player: parsePlayer(row.hostPlayer)! },
@@ -550,6 +580,8 @@ async function finalizeOnlineRoom(row: RoomRow) {
       telemetry: match?.bots[participant.side].telemetry ?? {},
       replay,
       campaign: false,
+      competitionId: competition?.id ?? null,
+      competitionTitle: competition?.title ?? null,
     };
     const next = {
       ...current.profile,

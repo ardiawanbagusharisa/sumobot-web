@@ -263,6 +263,9 @@ export const campaignReplays = sqliteTable("campaign_replays", {
 export const competitions = sqliteTable("competitions", {
   id: text("id").primaryKey(), title: text("title").notNull(), description: text("description").notNull(),
   status: text("status", { enum: ["draft","registration","active","closed","cancelled","archived"] }).notNull(),
+  isPrivate: integer("is_private", { mode: "boolean" }).notNull().default(false),
+  accessCodeHash: text("access_code_hash"),
+  maxPlayers: integer("max_players").notNull().default(8),
   registrationOpensAt: text("registration_opens_at").notNull(), startsAt: text("starts_at").notNull(), endsAt: text("ends_at").notNull(),
   rulesVersion: integer("rules_version").notNull(), rules: text("rules_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
   createdBy: text("created_by").notNull().references(() => players.id), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
@@ -274,15 +277,28 @@ export const competitionEnrollments = sqliteTable("competition_enrollments", {
 
 export const competitionQueueEntries = sqliteTable("competition_queue_entries", {
   competitionId: text("competition_id").notNull().references(() => competitions.id), playerId: text("player_id").notNull().references(() => players.id),
-  botId: text("bot_id").notNull(), controlMode: text("control_mode", { enum: ["buttons","live","script"] }).notNull(),
-  status: text("status", { enum: ["waiting","matched","cancelled"] }).notNull(), joinedAt: text("joined_at").notNull(), updatedAt: text("updated_at").notNull(),
+  botId: text("bot_id").notNull(), bot: text("bot_json", { mode: "json" }).$type<Record<string, unknown>>(), controlMode: text("control_mode", { enum: ["buttons","live","script"] }).notNull(),
+  status: text("status", { enum: ["waiting","assigned","matched","cancelled"] }).notNull(), pairingId: text("pairing_id"), joinedAt: text("joined_at").notNull(), updatedAt: text("updated_at").notNull(),
 }, (table) => [uniqueIndex("idx_competition_queue_player").on(table.competitionId, table.playerId)]);
+
+export const competitionPairings = sqliteTable("competition_pairings", {
+  id: text("id").primaryKey(), competitionId: text("competition_id").notNull().references(() => competitions.id),
+  playerAId: text("player_a_id").notNull().references(() => players.id), playerBId: text("player_b_id").notNull().references(() => players.id),
+  status: text("status", { enum: ["pending","assigned","launching","live","completed"] }).notNull().default("pending"),
+  acceptanceExpiresAt: integer("acceptance_expires_at"), playerAAcceptedAt: integer("player_a_accepted_at"), playerBAcceptedAt: integer("player_b_accepted_at"),
+  roomId: text("room_id").references(() => onlineRooms.id), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [uniqueIndex("idx_competition_pair_unique").on(table.competitionId, table.playerAId, table.playerBId), index("idx_competition_pairings_player_a").on(table.competitionId, table.playerAId, table.status), index("idx_competition_pairings_player_b").on(table.competitionId, table.playerBId, table.status)]);
 
 export const competitionResults = sqliteTable("competition_results", {
   id: text("id").primaryKey(), competitionId: text("competition_id").notNull().references(() => competitions.id),
   matchId: text("match_id").notNull(), playerId: text("player_id").notNull().references(() => players.id),
   result: text("result", { enum: ["win","draw","loss"] }).notNull(), points: real("points").notNull(), playedAt: text("played_at").notNull(),
 }, (table) => [uniqueIndex("idx_competition_result_match_player").on(table.competitionId, table.matchId, table.playerId), index("idx_competition_results_standings").on(table.competitionId, table.playerId)]);
+
+export const competitionRewardClaims = sqliteTable("competition_reward_claims", {
+  competitionId: text("competition_id").notNull().references(() => competitions.id), playerId: text("player_id").notNull().references(() => players.id),
+  placement: integer("placement"), gold: integer("gold").notNull(), xp: integer("xp").notNull(), createdAt: text("created_at").notNull(),
+}, (table) => [uniqueIndex("idx_competition_reward_claim").on(table.competitionId, table.playerId)]);
 
 export const adminAuditEvents = sqliteTable("admin_audit_events", {
   id: text("id").primaryKey(), adminPlayerId: text("admin_player_id").notNull().references(() => players.id),

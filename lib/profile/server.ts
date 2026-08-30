@@ -108,7 +108,14 @@ export async function getOnlineProfile(playerId: string): Promise<ProfileEnvelop
   const d1 = await getDatabase();
   const row = await d1.prepare("SELECT profile, revision FROM online_profiles WHERE player_id = ? LIMIT 1").bind(playerId).first<{ profile: string; revision: number }>();
   if (!row) return null;
-  return { profile: normalizeProfile(JSON.parse(row.profile)), revision: Number(row.revision) };
+  const profile=normalizeProfile(JSON.parse(row.profile));
+  const competitions=await d1.prepare(`SELECT cp.room_id AS roomId,c.id AS competitionId,c.title AS competitionTitle FROM competition_pairings cp INNER JOIN competitions c ON c.id=cp.competition_id WHERE cp.player_a_id=? OR cp.player_b_id=?`).bind(playerId,playerId).all<{roomId:string|null;competitionId:string;competitionTitle:string}>();
+  if(competitions.results.length)profile.battleHistory=profile.battleHistory.map((entry)=>{
+    if(entry.competitionId)return entry;
+    const match=competitions.results.find((item)=>item.roomId&&entry.id===`match-${item.roomId}-${playerId}`);
+    return match?{...entry,competitionId:match.competitionId,competitionTitle:match.competitionTitle}:entry;
+  });
+  return { profile, revision: Number(row.revision) };
 }
 
 export async function importOnlineProfile(user: AuthUser, candidate: unknown): Promise<ProfileEnvelope> {
