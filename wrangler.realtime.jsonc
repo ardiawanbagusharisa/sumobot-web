@@ -5,7 +5,7 @@
   "compatibility_date": "2026-08-10",
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
-    "RESULTS_URL": "https://sumobot-online-alpha.doodaalee.chatgpt.site/api/rooms/realtime-result"
+    "RESULTS_URL": "https://sumobot.doodaalee.chatgpt.site/api/rooms/realtime-result"
   },
   "durable_objects": {
     "bindings": [
