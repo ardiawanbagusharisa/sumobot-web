@@ -24,4 +24,6 @@ test("new accounts receive the defined server-side starting profile", () => {
   assert.deepEqual(profile.analytics, {});
   assert.deepEqual(profile.battleHistory, []);
   assert.equal(profile.campaignCompleted, false);
+  assert.equal(profile.scripts.length, 5);
+  assert.deepEqual(profile.scripts.map((script) => script.id), ["primitive", "fsm", "behavior-tree", "fuzzy", "utility"]);
 });

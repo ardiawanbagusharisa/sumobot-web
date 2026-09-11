@@ -1,7 +1,7 @@
 import { getDatabase } from "@/lib/db/server";
 import { ensureAuthSchema, type AuthUser } from "@/lib/auth/server";
 import { marketItems } from "@/lib/game/prototype-data";
-import { PRIMITIVE_SCRIPT } from "@/lib/game/rules";
+import { PLAYER_SCRIPT_LIMIT, PRIMITIVE_SCRIPT } from "@/lib/game/rules";
 import { campaignChapters, campaignLevels, levelsForChapter, type CampaignAttempt } from "@/lib/game/campaign";
 import { parseBotScript } from "@/lib/game/script-runtime";
 import { defaultOnlineProfile, type StoredProfile } from "@/lib/profile/default";
@@ -86,7 +86,7 @@ function normalizeProfile(value: unknown, economy?: { gold: number; xp: number }
   });
   return {
     bots: bots.length ? bots : fallback.bots,
-    scripts: boundedArray(input.scripts, 3).map((script) => ({
+    scripts: boundedArray(input.scripts, PLAYER_SCRIPT_LIMIT).map((script) => ({
       ...script,
       id: typeof script.id === "string" ? script.id.slice(0, 80) : crypto.randomUUID(),
       name: typeof script.name === "string" ? script.name.slice(0, 60) : "Strategy",

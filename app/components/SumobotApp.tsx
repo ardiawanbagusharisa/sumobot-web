@@ -4,13 +4,13 @@ import { BattleArena, type BattleReplayData, type BattleTelemetry } from "./Batt
 import { BattleReplay } from "./BattleReplay";
 import { BotVisual, type BotAppearance } from "./BotVisual";
 import { marketItems } from "@/lib/game/prototype-data";
-import { FSM_SCRIPT, MATCH_REWARDS, normalizeActionIntervalMs, PRIMITIVE_SCRIPT, RANK_POINTS, STARTER_SCRIPT, type ControlMode, type MatchResult, type SkillType } from "@/lib/game/rules";
+import { BOT_SCRIPT_TEMPLATES, MATCH_REWARDS, normalizeActionIntervalMs, PLAYER_SCRIPT_LIMIT, RANK_POINTS, STARTER_SCRIPT, type ControlMode, type MatchResult, type SkillType } from "@/lib/game/rules";
 import type { CampaignAttempt, CampaignLevel, CampaignLevelProgress } from "@/lib/game/campaign";
 import { CampaignCenter } from "./CampaignCenter";
 import { CompetitionCenter } from "./CompetitionCenter";
 import { CompetitionAdmin } from "./CompetitionAdmin";
 import { CampaignMission } from "./CampaignMission";
-import { migrateLegacyJsonScript, parseBotScript } from "@/lib/game/script-runtime";
+import { migrateLegacyJsonScript, parseBotScript, SCRIPT_CALL_DEPTH_LIMIT, SCRIPT_EXECUTION_LIMIT } from "@/lib/game/script-runtime";
 import { HOME_DEMO_META, HOME_DEMO_REPLAY } from "@/lib/game/demo-replay";
 import { OnlineRoomBrowser } from "./OnlineRooms";
 import { OnlineBattleRoom } from "./RealtimeBattleRoom";
@@ -104,6 +104,7 @@ const modeCopy: Record<ControlMode, {
     live: { title: "Live Command", description: "Type one API command at a time." },
     script: { title: "Script Pilot", description: "Run the script attached to your selected bot." },
 };
+const BUILTIN_SCRIPT_TEMPLATE_NAMES = BOT_SCRIPT_TEMPLATES.map((template) => template.name).join(", ");
 const SCRIPT_API_SECTIONS = [
     {
         id: "movement", title: "Movement actions", summary: "Return one action from decide(game) on each game tick.", entries: [
@@ -137,12 +138,26 @@ const SCRIPT_API_SECTIONS = [
             ["game.elapsed", "Seconds elapsed since the current match started.", "game.elapsed > 15"],
         ],
     },
+    {
+        id: "math", title: "Math helpers", summary: "Safe numeric helpers for fuzzy memberships, utility curves, and steering logic.", entries: [
+            ["abs(x)", "Return the absolute value of x.", "const alignmentError = abs(game.enemy.angle);"],
+            ["min(a, b)", "Return the smaller of two numbers.", "const nearest = min(game.enemy.distance, 5);"],
+            ["max(a, b)", "Return the larger of two numbers.", "const priority = max(attackScore, recoverScore);"],
+            ["clamp(x, low, high)", "Keep x inside an inclusive numeric range.", "const membership = clamp(score, 0, 1);"],
+        ],
+    },
+    {
+        id: "limits", title: "Language & safety", summary: "Every script runs in the same deterministic sandbox. These constraints apply to each decide(game) call.", entries: [
+            ["Supported DSL syntax", "Use functions, let/const variables, if/else, return, comments, scalar values, arithmetic, comparisons, and boolean operators. Loops, arrays, object literals, classes, imports, browser APIs, and network APIs are unavailable.", "function decide(game) {\n  if (game.enemy.distance < 2) return dash();\n  return forward(0.2);\n}"],
+            [`${SCRIPT_EXECUTION_LIMIT} statements / decision`, "A decision stops with a runtime error after this per-tick execution budget. Keep each decision bounded.", "Each decide(game) call receives a fresh budget."],
+            [`${SCRIPT_CALL_DEPTH_LIMIT} nested function calls`, "Function calls deeper than this limit stop with a runtime error. Recursive strategies must remain shallow and bounded.", "decide(game) → selector(game) → attack(game)"],
+            ["Built-in templates", `${BUILTIN_SCRIPT_TEMPLATE_NAMES} are editable, self-contained examples in the script library. They are not special runtime modes; custom algorithms use the same API and do not need template registration.`, "Choose + New script to build another algorithm."],
+        ],
+    },
 ] as const;
 const emptyLoadout = (): BotProfile["loadout"] => ({ wheel: null, body: null, face: null, accessory: null });
-const initialScripts: SavedScript[] = [
-    { id: "primitive", name: "Primitive Rules", source: PRIMITIVE_SCRIPT, updatedAt: "Built-in template" },
-    { id: "fsm", name: "State Machine", source: FSM_SCRIPT, updatedAt: "Built-in template" },
-];
+const initialScripts: SavedScript[] = BOT_SCRIPT_TEMPLATES.map((template) => ({ ...template, updatedAt: "Built-in template" }));
+const BUILTIN_SCRIPT_IDS = new Set(BOT_SCRIPT_TEMPLATES.map((template) => template.id));
 const initialBots: BotProfile[] = [
     { id: "rivet", name: "Rivet", skill: "boost", scriptId: "primitive", loadout: { wheel: null, body: "body-citrus", face: "face-happy", accessory: null } },
     { id: "relay", name: "Relay", skill: "stone", scriptId: null, loadout: emptyLoadout() },
@@ -214,6 +229,7 @@ export function SumobotApp() {
     const [profileLoaded, setProfileLoaded] = useState(false);
     const profileRevisionRef = useRef(0);
     const lastSyncedProfileRef = useRef("");
+    const scriptLineNumbersRef = useRef<HTMLDivElement>(null);
     const showToast = (message: string) => { setToast(message); window.setTimeout(() => setToast(null), 2800); };
     const applySaved = (saved: SavedProfile | null) => {
         if (!saved)
@@ -225,7 +241,7 @@ export function SumobotApp() {
             setBattleBotId(normalized[0].id);
         }
         if (saved.scripts?.length) {
-            const custom = saved.scripts.filter((script) => !["starter", "primitive", "fsm"].includes(script.id)).slice(0, 1).map((script) => script.source.trim().startsWith("{") ? { ...script, source: migrateLegacyJsonScript(script.source), updatedAt: "Migrated to Sumobot DSL" } : script);
+            const custom = saved.scripts.filter((script) => script.id !== "starter" && !BUILTIN_SCRIPT_IDS.has(script.id as (typeof BOT_SCRIPT_TEMPLATES)[number]["id"])).slice(0, PLAYER_SCRIPT_LIMIT - initialScripts.length).map((script) => script.source.trim().startsWith("{") ? { ...script, source: migrateLegacyJsonScript(script.source), updatedAt: "Migrated to Sumobot DSL" } : script);
             const persistedTemplates = initialScripts.map((template) => {
                 const savedTemplate = saved.scripts.find((script) => script.id === template.id);
                 return !savedTemplate ? template : savedTemplate.source.trim().startsWith("{") ? { ...savedTemplate, source: migrateLegacyJsonScript(savedTemplate.source), updatedAt: "Migrated to Sumobot DSL" } : savedTemplate;
@@ -492,8 +508,8 @@ export function SumobotApp() {
             return;
         }
         if (asCopy) {
-            if (scripts.length >= 3) {
-                setScriptStatus("You can save up to 3 scripts.");
+            if (scripts.length >= PLAYER_SCRIPT_LIMIT) {
+                setScriptStatus(`You can save up to ${PLAYER_SCRIPT_LIMIT} scripts.`);
                 return;
             }
             const copy: SavedScript = { id: `script-${Date.now()}`, name: scriptName.trim() || "Untitled Strategy", source: scriptDraft, updatedAt: new Date().toLocaleDateString() };
@@ -507,7 +523,7 @@ export function SumobotApp() {
         }
     };
     const deleteScript = () => {
-        if (!selectedScriptId || ["primitive", "fsm"].includes(selectedScriptId)) { showToast("Built-in learning templates cannot be deleted."); return; }
+        if (!selectedScriptId || BUILTIN_SCRIPT_IDS.has(selectedScriptId as (typeof BOT_SCRIPT_TEMPLATES)[number]["id"])) { showToast("Built-in learning templates cannot be deleted."); return; }
         const target = scripts.find((script) => script.id === selectedScriptId);
         if (!target || !window.confirm(`Delete ${target.name}? Bots using it will be detached. Existing game logs will remain.`)) return;
         const remaining = scripts.filter((script) => script.id !== target.id);
@@ -843,13 +859,13 @@ export function SumobotApp() {
       <div className="page-intro"><div><span className="eyebrow">Script library & evidence</span><h1>Build. Test. Inspect.</h1><p>Write familiar code, attach it to bots, and inspect data from real claimed Script battles.</p></div><button className="button button-primary" type="button" onClick={startLabTest}>TEST RUN &gt;</button></div>
       <div className="script-workbench"><div className="editor-card">
         <div className="editor-toolbar lab-editor-toolbar">
-          <label><span>Saved script · {scripts.length}/3</span><select value={selectedScriptId} onChange={(event) => { const item = scripts.find((script) => script.id === event.target.value); if (item) selectScript(item); }}><option value="" disabled>Unsaved script</option>{scripts.map((item) => <option key={item.id} value={item.id}>{item.name} · {scriptRecordCounts[item.id] ?? 0} matches</option>)}</select></label>
-          <button type="button" disabled={scripts.length >= 3} onClick={() => { setScriptName("Untitled Strategy"); setScriptDraft(STARTER_SCRIPT); setSelectedScriptId(""); setScriptStatus("New script ready"); }}>+ New script</button>
-          <button className="delete-script" type="button" title={["primitive", "fsm"].includes(selectedScriptId) ? "Built-in templates are always available" : "Delete selected script"} disabled={!selectedScriptId || ["primitive", "fsm"].includes(selectedScriptId)} onClick={deleteScript}>Delete</button>
+          <label><span>Saved script · {scripts.length}/{PLAYER_SCRIPT_LIMIT}</span><select value={selectedScriptId} onChange={(event) => { const item = scripts.find((script) => script.id === event.target.value); if (item) selectScript(item); }}><option value="" disabled>Unsaved script</option>{scripts.map((item) => <option key={item.id} value={item.id}>{item.name} · {scriptRecordCounts[item.id] ?? 0} matches</option>)}</select></label>
+          <button type="button" disabled={scripts.length >= PLAYER_SCRIPT_LIMIT} onClick={() => { setScriptName("Untitled Strategy"); setScriptDraft(STARTER_SCRIPT); setSelectedScriptId(""); setScriptStatus("New script ready"); }}>+ New script</button>
+          <button className="delete-script" type="button" title={BUILTIN_SCRIPT_IDS.has(selectedScriptId as (typeof BOT_SCRIPT_TEMPLATES)[number]["id"]) ? "Built-in templates are always available" : "Delete selected script"} disabled={!selectedScriptId || BUILTIN_SCRIPT_IDS.has(selectedScriptId as (typeof BOT_SCRIPT_TEMPLATES)[number]["id"])} onClick={deleteScript}>Delete</button>
           <input value={scriptName} onChange={(event) => setScriptName(event.target.value)} aria-label="Script name"/><span>{scriptStatus}</span>
         </div>
-        <div className="editor-body"><div className="line-numbers">{Array.from({ length: scriptDraft.split("\n").length }, (_, index) => <span key={index}>{index + 1}</span>)}</div><textarea value={scriptDraft} onChange={(event) => setScriptDraft(event.target.value)} spellCheck={false}/></div>
-        <div className="editor-footer"><button type="button" onClick={() => saveScript(false)} disabled={!selectedScriptId}>Save changes</button><button type="button" onClick={() => saveScript(true)} disabled={scripts.length >= 3}>Save as new</button></div>
+        <div className="editor-body"><div ref={scriptLineNumbersRef} className="line-numbers" aria-hidden="true">{Array.from({ length: scriptDraft.split("\n").length }, (_, index) => <span key={index}>{index + 1}</span>)}</div><textarea aria-label="Bot script source" value={scriptDraft} onChange={(event) => setScriptDraft(event.target.value)} onScroll={(event) => { if (scriptLineNumbersRef.current) scriptLineNumbersRef.current.scrollTop = event.currentTarget.scrollTop; }} spellCheck={false}/></div>
+        <div className="editor-footer"><button type="button" onClick={() => saveScript(false)} disabled={!selectedScriptId}>Save changes</button><button type="button" onClick={() => saveScript(true)} disabled={scripts.length >= PLAYER_SCRIPT_LIMIT}>Save as new</button></div>
       </div></div>
       <div className="section-tabs lab-section-tabs" role="tablist" aria-label="Lab reference and diagnostics"><button type="button" role="tab" aria-selected={labTab === "api"} className={labTab === "api" ? "active" : ""} onClick={() => setLabTab("api")}>Available API</button><button type="button" role="tab" aria-selected={labTab === "diagnostics"} className={labTab === "diagnostics" ? "active" : ""} onClick={() => setLabTab("diagnostics")}>Diagnostics</button></div>{labTab === "api" ? labApiPanel : labDiagnosticsPanel}
     </section>}

@@ -2,6 +2,8 @@ export type ControlMode = "buttons" | "live" | "script";
 export type SkillType = "boost" | "stone";
 export type MatchResult = "win" | "draw" | "loss";
 
+export const PLAYER_SCRIPT_LIMIT = 15;
+
 export const GAME_RULES = {
   roundsPerMatch: 3,
   winsRequired: 2,
@@ -99,41 +101,249 @@ function decide(game) {
   return forward(0.2);
 }`;
 
-export const FSM_SCRIPT = `// A state machine built with normal script variables.
-let state = "seek";
+export const FSM_SCRIPT = `// Finite State Machine
+// One script owns the state, transitions, and every state handler.
+let state = "searching";
+let stateChangedAt = 0;
 
-function faceEnemy(game) {
-  if (game.enemy.angle < -12) return turnleft(0.1);
-  if (game.enemy.angle > 12) return turnright(0.1);
+function transition(nextState, game) {
+  state = nextState;
+  stateChangedAt = game.elapsed;
+  return true;
+}
+
+function steerToEnemy(game, tolerance) {
+  if (game.enemy.angle < -tolerance) return turnleft(0.1);
+  if (game.enemy.angle > tolerance) return turnright(0.1);
   return forward(0.2);
 }
 
+function searching(game) {
+  if (game.self.distanceFromCenter > game.arena.radius * 0.78) {
+    transition("recovering", game);
+    return recovering(game);
+  }
+  if (game.enemy.distance < 5 && abs(game.enemy.angle) < 20) {
+    transition("approaching", game);
+    return approaching(game);
+  }
+  return steerToEnemy(game, 20);
+}
+
+function approaching(game) {
+  if (game.self.distanceFromCenter > game.arena.radius * 0.82) {
+    transition("recovering", game);
+    return recovering(game);
+  }
+  if (game.enemy.distance < 2.5 && abs(game.enemy.angle) < 15) {
+    transition("attacking", game);
+    return attacking(game);
+  }
+  if (game.enemy.distance > 6 || abs(game.enemy.angle) > 50) {
+    transition("searching", game);
+    return searching(game);
+  }
+  return steerToEnemy(game, 12);
+}
+
+function attacking(game) {
+  if (game.self.distanceFromCenter > game.arena.radius * 0.84) {
+    transition("recovering", game);
+    return recovering(game);
+  }
+  if (game.enemy.distance > 4 || abs(game.enemy.angle) > 25) {
+    transition("approaching", game);
+    return approaching(game);
+  }
+  if (game.self.skillReady && !game.enemy.stone) return skill();
+  if (game.self.dashReady && abs(game.enemy.angle) < 10) return dash();
+  return steerToEnemy(game, 8);
+}
+
+function recovering(game) {
+  if (game.self.distanceFromCenter < game.arena.radius * 0.56 && game.elapsed - stateChangedAt > 0.1) {
+    transition("searching", game);
+    return searching(game);
+  }
+  if (game.self.angleToCenter < -10) return turnleft(0.15);
+  if (game.self.angleToCenter > 10) return turnright(0.15);
+  return forward(0.3);
+}
+
 function decide(game) {
-  const nearEdge = game.self.distanceFromCenter > game.arena.radius * 0.78;
-
-  if (state == "seek") {
-    if (nearEdge) state = "recover";
-    else if (game.enemy.distance < 1.6) state = "attack";
-    else return faceEnemy(game);
-  }
-
-  if (state == "attack") {
-    if (nearEdge) state = "recover";
-    else if (game.enemy.distance > 2.4) state = "seek";
-    else if (game.self.skillReady) return skill();
-    else if (game.self.dashReady) return dash();
-    else return faceEnemy(game);
-  }
-
-  if (state == "recover") {
-    if (game.self.distanceFromCenter < game.arena.radius * 0.55) state = "seek";
-    else if (game.self.angleToCenter < -10) return turnleft(0.15);
-    else if (game.self.angleToCenter > 10) return turnright(0.15);
-    else return forward(0.3);
-  }
-
-  return faceEnemy(game);
+  if (state == "searching") return searching(game);
+  if (state == "approaching") return approaching(game);
+  if (state == "attacking") return attacking(game);
+  if (state == "recovering") return recovering(game);
+  transition("searching", game);
+  return searching(game);
 }`;
+
+export const BEHAVIOR_TREE_SCRIPT = `// Behavior Tree
+// The root selector tries branches in priority order. Each branch is a
+// sequence: a condition must succeed before its action is returned.
+function nearEdge(game) {
+  return game.self.distanceFromCenter > game.arena.radius * 0.8;
+}
+
+function inAttackRange(game) {
+  return game.enemy.distance < 2.5 && abs(game.enemy.angle) < 15;
+}
+
+function inApproachRange(game) {
+  return game.enemy.distance < 5 && abs(game.enemy.angle) < 45;
+}
+
+function recoverAction(game) {
+  if (game.self.angleToCenter < -10) return turnleft(0.15);
+  if (game.self.angleToCenter > 10) return turnright(0.15);
+  return forward(0.3);
+}
+
+function attackAction(game) {
+  if (game.self.skillReady && !game.enemy.stone) return skill();
+  if (game.self.dashReady && abs(game.enemy.angle) < 10) return dash();
+  return forward(0.2);
+}
+
+function approachAction(game) {
+  if (game.enemy.angle < -12) return turnleft(0.1);
+  if (game.enemy.angle > 12) return turnright(0.1);
+  return forward(0.25);
+}
+
+function searchAction(game) {
+  if (game.enemy.angle < -25) return turnleft(0.2);
+  if (game.enemy.angle > 25) return turnright(0.2);
+  return forward(0.15);
+}
+
+function recoverSequence(game) {
+  if (!nearEdge(game)) return null;
+  return recoverAction(game);
+}
+
+function attackSequence(game) {
+  if (!inAttackRange(game)) return null;
+  return attackAction(game);
+}
+
+function approachSequence(game) {
+  if (!inApproachRange(game)) return null;
+  return approachAction(game);
+}
+
+function rootSelector(game) {
+  let result = recoverSequence(game);
+  if (result) return result;
+  result = attackSequence(game);
+  if (result) return result;
+  result = approachSequence(game);
+  if (result) return result;
+  return searchAction(game);
+}
+
+function decide(game) {
+  return rootSelector(game);
+}`;
+
+export const FUZZY_SCRIPT = `// Sugeno-style Fuzzy Logic
+// Sensor values belong to several overlapping sets at the same time.
+function triangle(value, center, spread) {
+  return clamp(1 - abs(value - center) / spread, 0, 1);
+}
+
+function decide(game) {
+  const distance = game.enemy.distance;
+  const angle = game.enemy.angle;
+  const angleSize = abs(angle);
+
+  // Fuzzification: continuous memberships from 0 to 1.
+  const close = triangle(distance, 0.7, 1.4);
+  const medium = triangle(distance, 2.5, 2.2);
+  const far = clamp((distance - 2) / 4, 0, 1);
+  const front = triangle(angleSize, 0, 50);
+  const left = clamp(-angle / 90, 0, 1);
+  const right = clamp(angle / 90, 0, 1);
+  const edge = clamp((game.self.distanceFromCenter - game.arena.radius * 0.65) / (game.arena.radius * 0.25), 0, 1);
+
+  // Rule inference: membership strength times each rule's crisp output.
+  let forwardScore = far * front * 3 + medium * front * 2;
+  let leftScore = left * 1.8;
+  let rightScore = right * 1.8;
+  let dashScore = 0;
+  let skillScore = 0;
+
+  if (game.self.dashReady) dashScore = close * front * 5;
+  if (game.self.skillReady && !game.enemy.stone) skillScore = (close + medium) * front * 2.4;
+
+  // Arena-safety rules smoothly override combat as border risk rises.
+  if (edge > 0) {
+    forwardScore = max(forwardScore * (1 - edge), edge * 4);
+    if (game.self.angleToCenter < -8) leftScore = max(leftScore, edge * 5);
+    if (game.self.angleToCenter > 8) rightScore = max(rightScore, edge * 5);
+    dashScore = dashScore * (1 - edge);
+    skillScore = skillScore * (1 - edge);
+  }
+
+  // Defuzzification: select the action with the strongest aggregated score.
+  let bestScore = forwardScore;
+  let bestAction = forward(0.22);
+  if (leftScore > bestScore) { bestScore = leftScore; bestAction = turnleft(0.12); }
+  if (rightScore > bestScore) { bestScore = rightScore; bestAction = turnright(0.12); }
+  if (skillScore > bestScore) { bestScore = skillScore; bestAction = skill(); }
+  if (dashScore > bestScore) { bestScore = dashScore; bestAction = dash(); }
+  return bestAction;
+}`;
+
+export const UTILITY_SCRIPT = `// Utility AI
+// Every candidate action is scored by multiplicative considerations.
+function rising(value, low, high) {
+  return clamp((value - low) / (high - low), 0, 1);
+}
+
+function falling(value, low, high) {
+  return 1 - rising(value, low, high);
+}
+
+function decide(game) {
+  const angle = game.enemy.angle;
+  const alignment = falling(abs(angle), 0, 90);
+  const closeEnemy = falling(game.enemy.distance, 0.7, 5);
+  const farEnemy = rising(game.enemy.distance, 1.5, 6);
+  const centerSafety = falling(game.self.distanceFromCenter, game.arena.radius * 0.55, game.arena.radius * 0.92);
+  const edgeDanger = 1 - centerSafety;
+  const leftNeed = rising(-angle, 5, 90);
+  const rightNeed = rising(angle, 5, 90);
+  const centerLeftNeed = rising(-game.self.angleToCenter, 5, 90);
+  const centerRightNeed = rising(game.self.angleToCenter, 5, 90);
+
+  // Multiplication gives each consideration veto power, matching Utility AI.
+  let forwardScore = (0.25 + farEnemy * 0.75) * (0.2 + alignment * 0.8) * (0.15 + centerSafety * 0.85);
+  let leftScore = max(leftNeed * centerSafety, centerLeftNeed * edgeDanger * 2);
+  let rightScore = max(rightNeed * centerSafety, centerRightNeed * edgeDanger * 2);
+  let dashScore = 0;
+  let skillScore = 0;
+
+  if (game.self.dashReady) dashScore = closeEnemy * alignment * centerSafety * 1.6;
+  if (game.self.skillReady && !game.enemy.stone) skillScore = closeEnemy * alignment * centerSafety * 1.8;
+
+  let bestScore = forwardScore;
+  let bestAction = forward(0.2);
+  if (leftScore > bestScore) { bestScore = leftScore; bestAction = turnleft(0.12); }
+  if (rightScore > bestScore) { bestScore = rightScore; bestAction = turnright(0.12); }
+  if (dashScore > bestScore) { bestScore = dashScore; bestAction = dash(); }
+  if (skillScore > bestScore) { bestScore = skillScore; bestAction = skill(); }
+  return bestAction;
+}`;
+
+export const BOT_SCRIPT_TEMPLATES = [
+  { id: "primitive", name: "Primitive Rules", source: PRIMITIVE_SCRIPT },
+  { id: "fsm", name: "Finite State Machine", source: FSM_SCRIPT },
+  { id: "behavior-tree", name: "Behavior Tree", source: BEHAVIOR_TREE_SCRIPT },
+  { id: "fuzzy", name: "Fuzzy Logic", source: FUZZY_SCRIPT },
+  { id: "utility", name: "Utility AI", source: UTILITY_SCRIPT },
+] as const;
 
 export const STARTER_SCRIPT = PRIMITIVE_SCRIPT;
 

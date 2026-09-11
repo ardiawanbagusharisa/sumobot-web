@@ -2,6 +2,8 @@ import { GAME_RULES, type SkillType } from "./rules";
 
 export type ScriptActionName = "forward" | "turnleft" | "turnright" | "dash" | "skill";
 export interface ScriptAction { name: ScriptActionName; duration?: number }
+export const SCRIPT_EXECUTION_LIMIT = 220;
+export const SCRIPT_CALL_DEPTH_LIMIT = 12;
 
 export interface ScriptGameState {
   game: {
@@ -286,6 +288,8 @@ export function createScriptRuntime(source: string) {
     }
     if (expression.type === "binary") {
       const left = evaluate(expression.left, local, depth);
+      if (expression.operator === "&&") return Boolean(left) && Boolean(evaluate(expression.right, local, depth));
+      if (expression.operator === "||") return Boolean(left) || Boolean(evaluate(expression.right, local, depth));
       const right = evaluate(expression.right, local, depth);
       if (expression.operator === "+") return number(left) + number(right);
       if (expression.operator === "-") return number(left) - number(right);
@@ -295,8 +299,6 @@ export function createScriptRuntime(source: string) {
       if (expression.operator === "<=") return number(left) <= number(right);
       if (expression.operator === ">") return number(left) > number(right);
       if (expression.operator === ">=") return number(left) >= number(right);
-      if (expression.operator === "&&") return Boolean(left) && Boolean(right);
-      if (expression.operator === "||") return Boolean(left) || Boolean(right);
       if (expression.operator === "==" || expression.operator === "===") return left === right;
       return left !== right;
     }
@@ -312,12 +314,28 @@ export function createScriptRuntime(source: string) {
       if (args.length) throw new Error(`${name}() does not take arguments.`);
       return { name };
     }
+    if (name === "abs") {
+      if (args.length !== 1) throw new Error("abs(x) requires one number.");
+      return Math.abs(number(args[0]));
+    }
+    if (name === "min" || name === "max") {
+      if (args.length !== 2) throw new Error(`${name}(a, b) requires two numbers.`);
+      return name === "min" ? Math.min(number(args[0]), number(args[1])) : Math.max(number(args[0]), number(args[1]));
+    }
+    if (name === "clamp") {
+      if (args.length !== 3) throw new Error("clamp(value, low, high) requires three numbers.");
+      const value = number(args[0]);
+      const low = number(args[1]);
+      const high = number(args[2]);
+      if (low > high) throw new Error("clamp(value, low, high) requires low to be at most high.");
+      return Math.min(high, Math.max(low, value));
+    }
     return callFunction(name, args, depth + 1);
   };
 
   const run = (statement: Statement, local: Scope, depth: number): Execution => {
     budget += 1;
-    if (budget > 220) throw new Error("Script exceeded the per-tick execution limit.");
+    if (budget > SCRIPT_EXECUTION_LIMIT) throw new Error("Script exceeded the per-tick execution limit.");
     if (statement.type === "block") {
       for (const child of statement.body) { const result = run(child, local, depth); if (result.returned) return result; }
       return { returned: false };
@@ -345,7 +363,7 @@ export function createScriptRuntime(source: string) {
   };
 
   const callFunction = (name: string, args: RuntimeValue[], depth: number): RuntimeValue => {
-    if (depth > 12) throw new Error("Script function call limit exceeded.");
+    if (depth > SCRIPT_CALL_DEPTH_LIMIT) throw new Error("Script function call limit exceeded.");
     const fn = program.functions.get(name);
     if (!fn) throw new Error(`Unknown function "${name}".`);
     if (args.length !== fn.params.length) throw new Error(`${name}() expects ${fn.params.length} argument${fn.params.length === 1 ? "" : "s"}.`);
